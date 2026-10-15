@@ -11,7 +11,7 @@ static constexpr bool ggml_type_is_turboquant(enum ggml_type type) {
 #else
 static inline bool ggml_type_is_turboquant(enum ggml_type type) {
 #endif
-    return type == GGML_TYPE_TBQ3_0 || type == GGML_TYPE_TBQ4_0 || type == GGML_TYPE_TBQP3_0;
+    return type == GGML_TYPE_TURBO2_0 || type == GGML_TYPE_TBQ3_0 || type == GGML_TYPE_TBQ4_0 || type == GGML_TYPE_TBQP3_0;
 }
 
 #if defined(__CUDACC__) || defined(__HIPCC__) || defined(__MUSACC__)
@@ -19,6 +19,81 @@ static inline bool ggml_type_is_turboquant(enum ggml_type type) {
 #else
 #define GGML_TBQ_INLINE static inline
 #endif
+
+// TURBO2_0 uses the pinned TheTom 128-element rotation and norm correction.
+GGML_TBQ_INLINE float ggml_turbo2_sign(int i, bool second) {
+    const int8_t s1[128] = {
+        -1,1,1,-1,-1,1,-1,1,-1,-1,1,1,1,1,1,1,1,-1,1,-1,1,-1,-1,1,1,1,-1,1,1,-1,-1,-1,
+        -1,1,1,-1,1,1,-1,1,-1,1,1,-1,-1,1,-1,1,1,1,1,-1,-1,-1,-1,-1,1,-1,1,1,1,1,-1,1,
+        -1,-1,1,-1,-1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,1,-1,-1,1,1,1,-1,-1,1,1,-1,1,1,-1,1,-1,
+        -1,1,1,-1,1,-1,1,-1,1,1,1,1,-1,1,-1,1,1,-1,1,1,-1,-1,-1,-1,-1,1,1,-1,1,1,-1,1,
+    };
+    const int8_t s2[128] = {
+        1,1,1,1,-1,1,1,-1,1,-1,-1,-1,1,-1,-1,-1,1,1,-1,-1,1,-1,1,-1,1,-1,-1,1,-1,1,1,1,
+        1,1,-1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,1,-1,1,-1,1,1,1,-1,-1,1,-1,-1,-1,-1,-1,-1,1,1,
+        1,-1,1,-1,-1,-1,-1,1,-1,1,-1,1,-1,-1,1,1,-1,1,-1,1,1,-1,1,-1,-1,-1,-1,1,-1,-1,1,-1,
+        1,-1,1,1,1,-1,-1,1,-1,1,-1,1,1,-1,-1,1,-1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,-1,1,-1,
+    };
+    return second ? s2[i] : s1[i];
+}
+
+GGML_TBQ_INLINE float ggml_turbo2_centroid(int index) {
+    const float centroids[4] = {-0.133462f, -0.039994f, 0.039994f, 0.133462f};
+    return centroids[index];
+}
+
+GGML_TBQ_INLINE int ggml_turbo2_index(float x) {
+    return x < -0.086728f ? 0 : x < 0.0f ? 1 : x < 0.086728f ? 2 : 3;
+}
+
+GGML_TBQ_INLINE void ggml_turbo2_wht(float * x) {
+    for (int len = 1; len < 128; len *= 2) {
+        for (int i = 0; i < 128; i += 2*len) {
+            for (int j = 0; j < len; ++j) {
+                const float u = x[i + j];
+                const float v = x[i + j + len];
+                x[i + j] = u + v;
+                x[i + j + len] = u - v;
+            }
+        }
+    }
+}
+
+GGML_TBQ_INLINE void ggml_turbo2_encode(const float * x, uint8_t * qs, float * norm) {
+    float buf[128];
+    float sum = 0.0f;
+    for (int i = 0; i < 128; ++i) {
+        sum += x[i]*x[i];
+    }
+    const float original_norm = sqrtf(sum);
+    const float inv_norm = original_norm > 1e-10f ? 1.0f/original_norm : 0.0f;
+    for (int i = 0; i < 128; ++i) {
+        buf[i] = x[i]*inv_norm*ggml_turbo2_sign(i, false);
+    }
+    ggml_turbo2_wht(buf);
+    sum = 0.0f;
+    for (int i = 0; i < 32; ++i) {
+        qs[i] = 0;
+    }
+    for (int i = 0; i < 128; ++i) {
+        const int index = ggml_turbo2_index(buf[i]*(0.08838834764831845f*ggml_turbo2_sign(i, true)));
+        qs[i/4] |= (uint8_t) (index << (2*(i%4)));
+        const float centroid = ggml_turbo2_centroid(index);
+        sum += centroid*centroid;
+    }
+    const float reconstructed_norm = sqrtf(sum);
+    *norm = reconstructed_norm > 1e-10f ? original_norm/reconstructed_norm : original_norm;
+}
+
+GGML_TBQ_INLINE void ggml_turbo2_decode(const uint8_t * qs, float norm, float * y) {
+    for (int i = 0; i < 128; ++i) {
+        y[i] = norm*ggml_turbo2_centroid((qs[i/4] >> (2*(i%4))) & 3)*ggml_turbo2_sign(i, true);
+    }
+    ggml_turbo2_wht(y);
+    for (int i = 0; i < 128; ++i) {
+        y[i] *= 0.08838834764831845f*ggml_turbo2_sign(i, false);
+    }
+}
 
 GGML_TBQ_INLINE float ggml_tbq_sign(int i, bool qjl) {
     const uint8_t signs[32] = {

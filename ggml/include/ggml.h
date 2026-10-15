@@ -436,7 +436,8 @@ extern "C" {
         GGML_TYPE_TBQ3_0  = 144, // TurboQuant KV cache, group 256
         GGML_TYPE_TBQ4_0  = 145,
         GGML_TYPE_TBQP3_0 = 146,
-        GGML_TYPE_COUNT   = 147,
+        GGML_TYPE_TURBO2_0 = 147, // TurboQuant KV cache, group 128, no QJL
+        GGML_TYPE_COUNT    = 148,
     };
 
     // precision

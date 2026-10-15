@@ -37,6 +37,22 @@ static inline int best_index_int8(int n, const int8_t * val, float x) {
     return x - val[mu-1] < val[mu] - x ? mu-1 : mu;
 }
 
+void quantize_row_turbo2_0_ref(const float * GGML_RESTRICT x, block_turbo2_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO2 == 0);
+    for (int64_t i = 0; i < k/QK_TURBO2; ++i) {
+        float norm;
+        ggml_turbo2_encode(x + i*QK_TURBO2, y[i].qs, &norm);
+        y[i].d = GGML_FP32_TO_FP16(norm);
+    }
+}
+
+void dequantize_row_turbo2_0(const block_turbo2_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TURBO2 == 0);
+    for (int64_t i = 0; i < k/QK_TURBO2; ++i) {
+        ggml_turbo2_decode(x[i].qs, GGML_FP16_TO_FP32(x[i].d), y + i*QK_TURBO2);
+    }
+}
+
 void quantize_row_tbq3_0_ref(const float * GGML_RESTRICT x, block_tbq3_0 * GGML_RESTRICT y, int64_t k) {
     assert(k % QK_TBQ == 0);
     for (int64_t i = 0; i < k/QK_TBQ; ++i) {
@@ -5757,6 +5773,10 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_Q2_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q2_0, data, nb);
+            } break;
+        case GGML_TYPE_TURBO2_0:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_turbo2_0, data, nb);
             } break;
         case GGML_TYPE_TBQ3_0:
             {

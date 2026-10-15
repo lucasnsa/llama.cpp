@@ -5481,6 +5481,7 @@ class GGMLQuantizationType(IntEnum):
     TBQ3_0  = 144
     TBQ4_0  = 145
     TBQP3_0 = 146
+    TURBO2_0 = 147
 
 
 class ExpertGatingFuncType(IntEnum):
@@ -5680,6 +5681,7 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.TBQ3_0:  (256, 98),
     GGMLQuantizationType.TBQ4_0:  (256, 130),
     GGMLQuantizationType.TBQP3_0: (256, 100),
+    GGMLQuantizationType.TURBO2_0: (128, 34),
 }
 
 
