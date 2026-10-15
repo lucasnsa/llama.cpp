@@ -2,6 +2,7 @@
 #include "ggml-common.h"
 
 #include "ggml-quants.h"
+#include "ggml-turboquant.h"
 #include "ggml-impl.h"
 #include "ggml-cpu/ggml-cpu-impl.h"
 #include "ggml-cpu.h"
@@ -34,6 +35,55 @@ static inline int best_index_int8(int n, const int8_t * val, float x) {
         if (x < val[mav]) mu = mav; else ml = mav;
     }
     return x - val[mu-1] < val[mu] - x ? mu-1 : mu;
+}
+
+void quantize_row_tbq3_0_ref(const float * GGML_RESTRICT x, block_tbq3_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TBQ == 0);
+    for (int64_t i = 0; i < k/QK_TBQ; ++i) {
+        float norm, norm_qjl;
+        ggml_tbq_encode(x + i*QK_TBQ, y[i].qs, 3, &norm, NULL, &norm_qjl);
+        y[i].d = GGML_FP32_TO_FP16(norm);
+    }
+}
+
+void dequantize_row_tbq3_0(const block_tbq3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TBQ == 0);
+    for (int64_t i = 0; i < k/QK_TBQ; ++i) {
+        ggml_tbq_decode(x[i].qs, 3, GGML_FP16_TO_FP32(x[i].d), NULL, 0.0f, y + i*QK_TBQ);
+    }
+}
+
+void quantize_row_tbq4_0_ref(const float * GGML_RESTRICT x, block_tbq4_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TBQ == 0);
+    for (int64_t i = 0; i < k/QK_TBQ; ++i) {
+        float norm, norm_qjl;
+        ggml_tbq_encode(x + i*QK_TBQ, y[i].qs, 4, &norm, NULL, &norm_qjl);
+        y[i].d = GGML_FP32_TO_FP16(norm);
+    }
+}
+
+void dequantize_row_tbq4_0(const block_tbq4_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TBQ == 0);
+    for (int64_t i = 0; i < k/QK_TBQ; ++i) {
+        ggml_tbq_decode(x[i].qs, 4, GGML_FP16_TO_FP32(x[i].d), NULL, 0.0f, y + i*QK_TBQ);
+    }
+}
+
+void quantize_row_tbqp3_0_ref(const float * GGML_RESTRICT x, block_tbqp3_0 * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TBQ == 0);
+    for (int64_t i = 0; i < k/QK_TBQ; ++i) {
+        float norm, norm_qjl;
+        ggml_tbq_encode(x + i*QK_TBQ, y[i].qs, 2, &norm, y[i].qjl, &norm_qjl);
+        y[i].d = GGML_FP32_TO_FP16(norm);
+        y[i].d_qjl = GGML_FP32_TO_FP16(norm_qjl);
+    }
+}
+
+void dequantize_row_tbqp3_0(const block_tbqp3_0 * GGML_RESTRICT x, float * GGML_RESTRICT y, int64_t k) {
+    assert(k % QK_TBQ == 0);
+    for (int64_t i = 0; i < k/QK_TBQ; ++i) {
+        ggml_tbq_decode(x[i].qs, 2, GGML_FP16_TO_FP32(x[i].d), x[i].qjl, GGML_FP16_TO_FP32(x[i].d_qjl), y + i*QK_TBQ);
+    }
 }
 
 // reference implementation for deterministic creation of model files
@@ -5707,6 +5757,18 @@ bool ggml_validate_row_data(enum ggml_type type, const void * data, size_t nbyte
         case GGML_TYPE_Q2_0:
             {
                 VALIDATE_ROW_DATA_D_F16_IMPL(block_q2_0, data, nb);
+            } break;
+        case GGML_TYPE_TBQ3_0:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_tbq3_0, data, nb);
+            } break;
+        case GGML_TYPE_TBQ4_0:
+            {
+                VALIDATE_ROW_DATA_D_F16_IMPL(block_tbq4_0, data, nb);
+            } break;
+        case GGML_TYPE_TBQP3_0:
+            {
+                VALIDATE_ROW_DATA_DM_F16_IMPL(block_tbqp3_0, data, nb, d, d_qjl);
             } break;
         case GGML_TYPE_PQ2_0:
             {

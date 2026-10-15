@@ -434,7 +434,10 @@ extern "C" {
         // slots above upstream types; type_traits is sized to COUNT (143) with 43..141 unused.
         GGML_TYPE_PQ2_0 = 142,
         GGML_TYPE_PTQ1_0 = 143, // Prism-private ternary, group 128
-        GGML_TYPE_COUNT   = 144,
+        GGML_TYPE_TBQ3_0  = 144, // TurboQuant KV cache, group 256
+        GGML_TYPE_TBQ4_0  = 145,
+        GGML_TYPE_TBQP3_0 = 146,
+        GGML_TYPE_COUNT   = 147,
     };
 
     // precision

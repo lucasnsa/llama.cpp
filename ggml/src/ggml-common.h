@@ -219,6 +219,27 @@ typedef struct {
 } block_ptq1_0;
 static_assert(sizeof(block_ptq1_0) == sizeof(ggml_half) + QK_PTQ1_0/64 + (QK_PTQ1_0 - 4*QK_PTQ1_0/64)/5, "wrong ptq1_0 block size/padding");
 
+#define QK_TBQ 256
+typedef struct {
+    ggml_half d;
+    uint8_t qs[QK_TBQ*3/8];
+} block_tbq3_0;
+static_assert(sizeof(block_tbq3_0) == 98, "wrong tbq3_0 block size/padding");
+
+typedef struct {
+    ggml_half d;
+    uint8_t qs[QK_TBQ/2];
+} block_tbq4_0;
+static_assert(sizeof(block_tbq4_0) == 130, "wrong tbq4_0 block size/padding");
+
+typedef struct {
+    ggml_half d;
+    ggml_half d_qjl;
+    uint8_t qs[QK_TBQ/4];
+    uint8_t qjl[QK_TBQ/8];
+} block_tbqp3_0;
+static_assert(sizeof(block_tbqp3_0) == 100, "wrong tbqp3_0 block size/padding");
+
 #define QK4_0 32
 typedef struct {
     ggml_half d;           // delta

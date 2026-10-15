@@ -1,3 +1,4 @@
+#include "ggml-turboquant.h"
 #include "ggml-backend.h"
 #include "ggml-backend-impl.h"
 #include "ggml-cpu.h"
@@ -427,6 +428,15 @@ static bool ggml_backend_cpu_device_supports_op(ggml_backend_dev_t dev, const st
 
     if (op->op == GGML_OP_NONE || op->op == GGML_OP_RESHAPE || op->op == GGML_OP_VIEW || op->op == GGML_OP_PERMUTE || op->op == GGML_OP_TRANSPOSE) {
         return true;
+    }
+
+    if (ggml_type_is_turboquant(op->type)) {
+        return false;
+    }
+    for (const ggml_tensor * src : op->src) {
+        if (src && ggml_type_is_turboquant(src->type)) {
+            return false;
+        }
     }
 
     // check extra buffer types
