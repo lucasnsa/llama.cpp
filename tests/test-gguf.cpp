@@ -1422,6 +1422,33 @@ static void print_usage() {
     printf("  if no seed is unspecified then a random seed is used\n");
 }
 
+static bool test_bonsai_tensor_id() {
+    static_assert(GGML_TYPE_Q2_0 == 42 && GGML_TYPE_PQ2_0 == 142 && GGML_TYPE_PTQ1_0 == 143, "Bonsai tensor IDs changed");
+    ggml_init_params params = {ggml_tensor_overhead(), nullptr, true};
+    ggml_context * ctx = ggml_init(params);
+    if (!ctx) {
+        return false;
+    }
+    ggml_tensor * tensor = ggml_new_tensor_2d(ctx, GGML_TYPE_PTQ1_0, 128, 1);
+    ggml_set_name(tensor, "output.weight");
+    gguf_context * metadata = gguf_init_empty();
+    gguf_add_tensor(metadata, tensor);
+    std::vector<uint8_t> data(gguf_get_meta_size(metadata) + GGML_PAD(ggml_nbytes(tensor), gguf_get_alignment(metadata)), 0);
+    gguf_get_meta_data(metadata, data.data());
+    ggml_context * loaded_ctx = nullptr;
+    gguf_init_params load_params = {false, &loaded_ctx};
+    gguf_context * loaded = gguf_init_from_buffer(data.data(), data.size(), load_params);
+    ggml_tensor * output = loaded_ctx ? ggml_get_tensor(loaded_ctx, "output.weight") : nullptr;
+    const bool passed = loaded && output && gguf_get_tensor_type(loaded, 0) == GGML_TYPE_PTQ1_0 &&
+                        output->type == GGML_TYPE_PTQ1_0 && ggml_nbytes(output) == 28;
+    gguf_free(loaded);
+    ggml_free(loaded_ctx);
+    gguf_free(metadata);
+    ggml_free(ctx);
+    printf("%s: %s\n", __func__, passed ? "OK" : "FAIL");
+    return passed;
+}
+
 int main(int argc, char ** argv) {
     if (argc > 2) {
         print_usage();
@@ -1435,8 +1462,8 @@ int main(int argc, char ** argv) {
     ggml_backend_dev_count();
     fprintf(stderr, "\n");
 
-    int npass = 0;
-    int ntest = 0;
+    int npass = test_bonsai_tensor_id() ? 1 : 0;
+    int ntest = 1;
     {
         std::pair<int, int> result = test_handcrafted_file(seed);
         npass += result.first;

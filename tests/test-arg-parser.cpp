@@ -115,6 +115,30 @@ static void test(void) {
 
     std::vector<std::string> argv;
 
+    for (const std::string & k : {"tbq3", "tbq4", "tbqp3", "tbq3_0", "tbq4_0", "tbqp3_0"}) {
+        for (const std::string & v : {"tbq3", "tbq4", "tbq3_0", "tbq4_0"}) {
+            common_params cache_params;
+            argv = {"binary_name", "--cache-type-k", k, "--cache-type-v", v};
+            assert(common_params_parse(argv.size(), list_str_to_char(argv).data(), cache_params, LLAMA_EXAMPLE_SERVER));
+            assert(cache_params.cache_type_k == (k.find("tbqp3") == 0 ? GGML_TYPE_TBQP3_0 : k.find("tbq4") == 0 ? GGML_TYPE_TBQ4_0 : GGML_TYPE_TBQ3_0));
+            assert(cache_params.cache_type_v == (v.find("tbq4") == 0 ? GGML_TYPE_TBQ4_0 : GGML_TYPE_TBQ3_0));
+        }
+    }
+    for (const std::vector<std::string> & pair : std::vector<std::vector<std::string>>{
+            {"tbqp3", "tbqp3"}, {"tbq4", "tbqp3_0"}, {"tbq4", "f16"},
+            {"q4_1", "tbq4"}, {"unknown", "tbq3"}}) {
+        common_params cache_params;
+        argv = {"binary_name", "--cache-type-k", pair[0], "--cache-type-v", pair[1]};
+        assert(!common_params_parse(argv.size(), list_str_to_char(argv).data(), cache_params, LLAMA_EXAMPLE_SERVER));
+    }
+    for (const std::string & type : {"q4_1", "q5_0"}) {
+        common_params cache_params;
+        argv = {"binary_name", "-ctk", type, "-ctv", type};
+        assert(common_params_parse(argv.size(), list_str_to_char(argv).data(), cache_params, LLAMA_EXAMPLE_SERVER));
+        assert(cache_params.cache_type_k == (type == "q4_1" ? GGML_TYPE_Q4_1 : GGML_TYPE_Q5_0));
+        assert(cache_params.cache_type_v == cache_params.cache_type_k);
+    }
+
     printf("test-arg-parser: test invalid usage\n\n");
 
     // missing value

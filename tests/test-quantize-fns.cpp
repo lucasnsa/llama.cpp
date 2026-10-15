@@ -7,8 +7,10 @@
 #undef NDEBUG
 #include <assert.h>
 #include <math.h>
+#include <cmath>
 #include <stdio.h>
 #include <string>
+#include <cstring>
 #include <vector>
 
 #if defined(_MSC_VER)
@@ -281,6 +283,97 @@ static int test_vec_dot_ternary(bool verbose) {
     return num_failed;
 }
 
+static void test_turboquant() {
+    static_assert(GGML_TYPE_Q1_0 == 41 && GGML_TYPE_Q2_0 == 42, "existing tensor IDs changed");
+    static_assert(GGML_TYPE_PQ2_0 == 142 && GGML_TYPE_PTQ1_0 == 143, "Bonsai tensor IDs changed");
+    static_assert(GGML_TYPE_TBQ3_0 == 144 && GGML_TYPE_TBQ4_0 == 145 && GGML_TYPE_TBQP3_0 == 146, "TurboQuant tensor IDs changed");
+    for (ggml_type type : {GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0, GGML_TYPE_TBQP3_0}) {
+        const auto * traits = ggml_get_type_traits(type);
+        const size_t size = type == GGML_TYPE_TBQ3_0 ? 98 : type == GGML_TYPE_TBQ4_0 ? 130 : 100;
+        assert(ggml_blck_size(type) == 256 && ggml_type_size(type) == size);
+        std::vector<float> x(512, 0.0f), y(512);
+        std::vector<uint8_t> encoded(2*size), split(2*size);
+        traits->from_float_ref(x.data(), encoded.data(), x.size());
+        traits->to_float(encoded.data(), y.data(), y.size());
+        for (float value : y) {
+            assert(value == 0.0f);
+        }
+        for (uint8_t value : encoded) {
+            assert(value == 0);
+        }
+        x[0] = 1.0f;
+        generate_data(0.0f, 256, x.data() + 256);
+        assert(ggml_quantize_chunk(type, x.data(), encoded.data(), 0, 2, 256, nullptr) == encoded.size());
+        ggml_quantize_chunk(type, x.data(), split.data(), 0, 1, 256, nullptr);
+        ggml_quantize_chunk(type, x.data(), split.data(), 256, 1, 256, nullptr);
+        assert(encoded == split);
+        assert(ggml_validate_row_data(type, encoded.data(), encoded.size()));
+        traits->to_float(encoded.data(), y.data(), y.size());
+        for (float value : y) {
+            assert(std::isfinite(value));
+        }
+        if (type == GGML_TYPE_TBQ3_0 || type == GGML_TYPE_TBQ4_0) {
+            const uint8_t pattern[3] = {0x92, 0x24, 0x49};
+            for (size_t i = 2; i < size; ++i) {
+                assert(encoded[i] == (type == GGML_TYPE_TBQ3_0 ? pattern[(i - 2)%3] : 0x44));
+            }
+            const float expected = type == GGML_TYPE_TBQ3_0 ? 0.7560f : 0.9424f;
+            assert(fabsf(y[0] - expected) < 1e-5f);
+            for (int i = 1; i < 256; ++i) {
+                assert(fabsf(y[i]) < 1e-5f);
+            }
+        }
+        const ggml_fp16_t nan = 0x7e00;
+        memcpy(encoded.data(), &nan, sizeof(nan));
+        assert(!ggml_validate_row_data(type, encoded.data(), encoded.size()));
+    }
+
+    const uint8_t signs[32] = {
+        0xa7,0x3b,0x91,0xf4,0x6d,0xc2,0x58,0x0e,0xb3,0x7f,0x24,0xd6,0x89,0x45,0xea,0x1c,
+        0x63,0xaf,0xd8,0x52,0x97,0x0b,0xe1,0x3d,0x76,0xc4,0x19,0xfe,0x4a,0x85,0x2c,0xdb,
+    };
+    const uint8_t qjl_signs[32] = {
+        0xd3,0x4e,0xa8,0x17,0x9c,0x5b,0xe6,0x31,0x72,0xb9,0x0d,0xf5,0x43,0x8a,0x6e,0xc7,
+        0x58,0x2f,0x94,0xe1,0xb6,0x3d,0x0a,0x7c,0xc5,0x61,0xd8,0x4f,0xa3,0x97,0x1e,0x85,
+    };
+    auto walsh = [](int i, int j) {
+        unsigned bits = i & j;
+        int parity = 0;
+        while (bits) {
+            parity ^= bits & 1;
+            bits >>= 1;
+        }
+        return parity ? -1.0 : 1.0;
+    };
+    float x[256], q[256], decoded[256];
+    generate_data(0.0f, 256, x);
+    generate_data(1.0f, 256, q);
+    block_tbqp3_0 block;
+    quantize_row_tbqp3_0_ref(x, &block, 256);
+    dequantize_row_tbqp3_0(&block, decoded, 256);
+    double rotated[256] = {}, projected[256] = {};
+    for (int i = 0; i < 256; ++i) {
+        for (int j = 0; j < 256; ++j) {
+            rotated[i] += walsh(i, j)*q[j]*(((signs[j/8] >> (j%8)) & 1) ? -1.0 : 1.0);
+        }
+    }
+    for (int i = 0; i < 256; ++i) {
+        for (int j = 0; j < 256; ++j) {
+            projected[i] += walsh(i, j)*rotated[j]*(((qjl_signs[j/8] >> (j%8)) & 1) ? -1.0 : 1.0);
+        }
+    }
+    const float c2[4] = {-1.5104f, -0.4528f, 0.4528f, 1.5104f};
+    double expected = 0.0, actual = 0.0;
+    for (int i = 0; i < 256; ++i) {
+        expected += ggml_fp16_to_fp32(block.d)*c2[(block.qs[i/4] >> (2*(i%4))) & 3]*rotated[i]/256.0;
+        expected += ggml_fp16_to_fp32(block.d_qjl)*1.2533f*projected[i]*(((block.qjl[i/8] >> (i%8)) & 1) ? 1.0 : -1.0)/(256.0*256.0);
+        actual += (double) q[i]*decoded[i];
+    }
+    assert(fabs(actual - expected) < 1e-4*(1.0 + fabs(expected)));
+    block.d_qjl = 0x7e00;
+    assert(!ggml_validate_row_data(GGML_TYPE_TBQP3_0, &block, sizeof(block)));
+}
+
 int main(int argc, char * argv[]) {
     bool verbose = false;
 
@@ -299,6 +392,8 @@ int main(int argc, char * argv[]) {
     ggml_cpu_init();
 
     int num_failed = 0;
+
+    test_turboquant();
 
     num_failed += test_vec_dot_f32(verbose);
     num_failed += test_vec_dot_q(verbose);

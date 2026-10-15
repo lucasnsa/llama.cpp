@@ -1315,7 +1315,7 @@ struct test_case {
         }
     }
 
-    test_status_t eval(ggml_backend_t backend1,
+    virtual test_status_t eval(ggml_backend_t backend1,
                        ggml_backend_t backend2,
                        const char *   op_names_filter,
                        printer *      output_printer) {
@@ -7854,6 +7854,155 @@ struct test_flash_attn_ext : public test_case {
     }
 };
 
+struct test_turboquant_reference : public test_case {
+    const ggml_type type_k;
+    const ggml_type type_v;
+    const int64_t queries;
+    const int64_t sequences;
+    const int64_t cache_size;
+    const bool mask;
+    const bool write;
+    const bool view;
+    const ggml_type index_type;
+    const int64_t head_size;
+    const bool expect_unsupported;
+
+    test_turboquant_reference(ggml_type k, ggml_type v, int64_t q, int64_t seq, int64_t kv, bool masked = true, int64_t dim = 256, bool unsupported = false)
+        : type_k(k), type_v(v), queries(q), sequences(seq), cache_size(kv), mask(masked), write(false), view(true), index_type(GGML_TYPE_I64), head_size(dim), expect_unsupported(unsupported) {}
+
+    test_turboquant_reference(ggml_type type, ggml_type idx, bool src_view)
+        : type_k(type), type_v(type), queries(0), sequences(2), cache_size(7), mask(false), write(true), view(src_view), index_type(idx), head_size(256), expect_unsupported(false) {}
+
+    std::string vars() override {
+        return VARS_TO_STR11(type_k, type_v, queries, sequences, cache_size, mask, write, view, index_type, head_size, expect_unsupported);
+    }
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        if (write) {
+            test_set_rows tc(GGML_TYPE_F32, type_k, index_type, {512, cache_size, 2, sequences}, {1, 1}, view ? 6 : 3, view);
+            return tc.build_graph(ctx);
+        }
+        test_flash_attn_ext tc(head_size, head_size, 4, {6, sequences}, cache_size, queries, mask, false, 0, 0, GGML_PREC_F32, type_k, type_v, {0, 2, 1, 3}, view);
+        return tc.build_graph(ctx);
+    }
+
+    test_status_t eval(ggml_backend_t backend, ggml_backend_t cpu, const char * filter, printer * output_printer) override {
+        mode = MODE_TEST;
+        ggml_init_params params = {128*ggml_tensor_overhead() + ggml_graph_overhead(), nullptr, true};
+        ggml_context_ptr ctx(ggml_init(params));
+        GGML_ASSERT(ctx);
+        ggml_tensor * out = build_graph(ctx.get());
+        current_op_name = op_desc(out);
+        if (!matches_filter(out, filter)) {
+            return test_status_t::SKIPPED;
+        }
+        auto report = [&](bool supported, bool passed, const char * message) {
+            test_result result(ggml_backend_name(backend), current_op_name, vars(), "test", supported, passed, message);
+            print_test_result_locked(output_printer, result);
+            return !supported ? test_status_t::NOT_SUPPORTED : passed ? test_status_t::OK : test_status_t::FAIL;
+        };
+        auto * reg = ggml_backend_dev_backend_reg(ggml_backend_get_device(backend));
+        if (strcmp(ggml_backend_reg_name(reg), "CUDA") != 0) {
+            return report(false, false, "CUDA required");
+        }
+        const bool supported = ggml_backend_supports_op(backend, out);
+        if (expect_unsupported) {
+            return report(true, !supported, supported ? "unsupported cache configuration accepted" : "");
+        }
+        if (!supported) {
+            return report(false, false, "CUDA TurboQuant pair not compiled");
+        }
+        ggml_backend_buffer_ptr buffer(ggml_backend_alloc_ctx_tensors(ctx.get(), backend));
+        if (!buffer) {
+            return report(true, false, "allocation failed");
+        }
+        if (write) {
+            test_set_rows tc(GGML_TYPE_F32, type_k, index_type, {512, cache_size, 2, sequences}, {1, 1}, view ? 6 : 3, view);
+            tc.initialize_tensors(ctx.get());
+            ggml_tensor * src = ggml_get_tensor(ctx.get(), "src");
+            std::vector<float> data(ggml_nelements(src));
+            for (size_t block = 0; block < data.size()/256; ++block) {
+                for (int i = 0; i < 256; ++i) {
+                    data[block*256 + i] = block%3 == 0 ? 0.0f : block%3 == 1 ? (i == 17 ? 1.0f : 0.0f) : (i%2 ? -0.0625f : 0.0625f);
+                }
+            }
+            ggml_backend_tensor_set(src, data.data(), 0, data.size()*sizeof(float));
+        } else {
+            test_flash_attn_ext tc;
+            tc.initialize_tensors(ctx.get());
+        }
+        gf = ggml_new_graph(ctx.get());
+        ggml_build_forward_expand(gf, out);
+
+        if (write) {
+            const ggml_tensor * src = out->src[0];
+            const ggml_tensor * idx = out->src[1];
+            const auto input = tensor_to_float(src);
+            const auto indices = tensor_to_float(idx);
+            std::vector<uint8_t> expected(ggml_nbytes(out)), actual(expected.size());
+            ggml_backend_tensor_get(out->src[2], expected.data(), 0, expected.size());
+            const auto * traits = ggml_get_type_traits(type_k);
+            for (int64_t s3 = 0; s3 < src->ne[3]; ++s3) {
+                for (int64_t s2 = 0; s2 < src->ne[2]; ++s2) {
+                    for (int64_t row = 0; row < src->ne[1]; ++row) {
+                        const int64_t target = (int64_t) indices[row + idx->ne[0]*(s2%idx->ne[1] + idx->ne[1]*(s3%idx->ne[2]))];
+                        const size_t offset = target*out->nb[1] + s2*out->nb[2] + s3*out->nb[3];
+                        const float * values = input.data() + src->ne[0]*(row + src->ne[1]*(s2 + src->ne[2]*s3));
+                        traits->from_float_ref(values, expected.data() + offset, src->ne[0]);
+                    }
+                }
+            }
+            if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
+                return report(true, false, "cache write failed");
+            }
+            ggml_backend_tensor_get(out, actual.data(), 0, actual.size());
+            return report(true, actual == expected, actual == expected ? "" : "cache bytes differ from scalar codec");
+        }
+
+        // Decode the same cache bytes into a separate F32 CPU reference graph.
+        ggml_context_ptr ref_ctx(ggml_init(params));
+        GGML_ASSERT(ref_ctx);
+        ggml_tensor * inputs[4] = {};
+        for (int i = 0; i < 4; ++i) {
+            if (out->src[i]) {
+                inputs[i] = ggml_new_tensor(ref_ctx.get(), i == 3 ? GGML_TYPE_F16 : GGML_TYPE_F32, 4, out->src[i]->ne);
+            }
+        }
+        ggml_tensor * ref_out = ggml_flash_attn_ext(ref_ctx.get(), inputs[0], inputs[1], inputs[2], inputs[3], 1.0f/16.0f, 0.0f, 0.0f);
+        ggml_cgraph * ref_graph = ggml_new_graph(ref_ctx.get());
+        ggml_build_forward_expand(ref_graph, ref_out);
+        ggml_backend_buffer_ptr ref_buffer(ggml_backend_alloc_ctx_tensors(ref_ctx.get(), cpu));
+        if (!ref_buffer) {
+            return report(true, false, "reference allocation failed");
+        }
+        for (int i = 0; i < 4; ++i) {
+            if (!inputs[i]) {
+                continue;
+            }
+            const auto values = tensor_to_float(out->src[i]);
+            if (i == 3) {
+                std::vector<ggml_fp16_t> halves(values.size());
+                ggml_fp32_to_fp16_row(values.data(), halves.data(), values.size());
+                ggml_backend_tensor_set(inputs[i], halves.data(), 0, halves.size()*sizeof(ggml_fp16_t));
+            } else {
+                ggml_backend_tensor_set(inputs[i], values.data(), 0, values.size()*sizeof(float));
+            }
+        }
+        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS || ggml_backend_graph_compute(cpu, ref_graph) != GGML_STATUS_SUCCESS) {
+            return report(true, false, "attention computation failed");
+        }
+        const auto actual = tensor_to_float(out);
+        const auto expected = tensor_to_float(ref_out);
+        bool finite = true;
+        for (size_t i = 0; i < actual.size(); ++i) {
+            finite = finite && std::isfinite(actual[i]) && std::isfinite(expected[i]);
+        }
+        const bool passed = finite && nmse(actual.data(), expected.data(), actual.size()) <= 5e-4;
+        return report(true, passed, passed ? "" : "attention differs from decoded F32 reference");
+    }
+};
+
+
 // GGML_OP_CROSS_ENTROPY_LOSS
 struct test_cross_entropy_loss : public test_case {
     const ggml_type type;
@@ -10749,6 +10898,24 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
     }
+
+    for (ggml_type k : {GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0, GGML_TYPE_TBQP3_0}) {
+        for (ggml_type idx : {GGML_TYPE_I32, GGML_TYPE_I64}) {
+            for (bool view : {false, true}) {
+                test_cases.emplace_back(new test_turboquant_reference(k, idx, view));
+            }
+        }
+        for (ggml_type v : {GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0}) {
+            for (int64_t queries : {1, 3, 16}) {
+                test_cases.emplace_back(new test_turboquant_reference(k, v, queries, 2, 512));
+            }
+            test_cases.emplace_back(new test_turboquant_reference(k, v, 1, 1, 4096, false));
+        }
+    }
+
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ4_0, GGML_TYPE_TBQ4_0, 1, 1, 256, true, 512, true));
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ4_0, GGML_TYPE_TBQP3_0, 1, 1, 256, true, 256, true));
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_F16, GGML_TYPE_TBQ4_0, 1, 1, 256, true, 256, true));
 
     // mixed quant and Q1_0 test cases
     // ARC-LAB: q4_0-cache decode kernel (SYCL fattn-dec): Bonsai 27B shape (D 256, 4 KV heads x GQA 6), 1-4 query tokens
