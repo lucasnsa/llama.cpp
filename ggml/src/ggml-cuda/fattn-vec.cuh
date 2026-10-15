@@ -161,6 +161,7 @@ static __global__ void flash_attn_ext_vec(
     float2 Q_ds[ncols][Q_ds_size];
 
     ggml_cuda_pdl_sync();
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
     if constexpr (prepared_q) {
         for (int j = 0; j < ncols; ++j) {
             const bool valid = ic0 + j < int(ne01.z);
@@ -173,7 +174,9 @@ static __global__ void flash_attn_ext_vec(
                 }
             }
         }
-    } else if constexpr (Q_q8_1) {
+    } else
+#endif
+    if constexpr (Q_q8_1) {
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
             const int j = j0 + threadIdx.y;

@@ -1,6 +1,6 @@
 # TurboQuant KV cache integration
 
-Status: **PENDING USER VALIDATION** for compilation, regression execution, model inference, numerical correctness, benchmarks, and GPU compatibility. Development performed source inspection and diff checks only. No builds, CMake, tests, project binaries, CUDA code, inference, or source generators were executed.
+Status: **PENDING USER VALIDATION** for compilation, regression execution, model inference, numerical correctness, benchmarks, and GPU compatibility of the current branch. The user supplied successful RTX 3070 results for the earlier `ef52091d3` build, recorded below; those results do not validate the later TURBO2 or prefill changes. Development performed source inspection and diff checks only. No builds, CMake, tests, project binaries, CUDA code, inference, or source generators were executed.
 
 ## Scope and architecture
 
@@ -9,6 +9,8 @@ This is a Bonsai-first integration for a personal PrismML fork. The implementati
 Reference: [jarkevithwlad/turboquant-prismml-cuda](https://github.com/jarkevithwlad/turboquant-prismml-cuda), pinned to `f7d1a4381104ed72cca090f8f0b56633fbebd620`. Relevant history includes `45a2ef747c3b8bb56bd44787ae39af1d59508519` (reference rebase), `1bc46807d98df97d94ce37a7934e70a314c72eac` (normalization and V rotation corrections), and `0bfe33411f7af381964510d083a0d8ee047201ef` (external/internal rotation interaction). These are provenance references, not commits merged into this branch. The reference's attention-sharpening heuristic, AMX types, other head dimensions, FP8 type remapping, and unrelated server changes are excluded.
 
 The 2-bit addition is on local branch `feature/turboquant-2bit-kv-cache`, descended from `feature/turboquant-kv-cache` at `ef52091d3f54cece74b07115cdec9a27742f106c`. It preserves the earlier 3-bit and 4-bit integration. Neither this addition nor its validation commands require merging or synchronizing upstream.
+
+The prefill changes are on local branch `feature/turboquant-prefill-cuda`, descended from the 2-bit branch at `57e1458b35a18be2307fc407bd79f8d007e20868`. The commits are local only. The codecs, type IDs, weight kernels, server API, and compressed cache representation are unchanged by these optimizations.
 
 Cache writes use the existing CUDA SET_ROWS interface and its per-block writer dispatch. TBQ3, TBQ4, and TBQP3 use 256-element blocks with deterministic sign flips, a Walsh-Hadamard transform, and Lloyd-Max scalar quantization. TBQP3 stores a 2-bit centroid index and a 1-bit QJL residual projection. Shared internal codec routines keep the CPU reference and CUDA writer tables and packing consistent.
 
@@ -85,7 +87,7 @@ All commands below are for the user's compilation machine only. No dependencies 
 Run from the repository root in Bash. Adjust only the CUDA installation path if necessary. Two build jobs limit peak compiler memory on the approximately 16 GB RAM machine.
 
 ```bash
-git switch feature/turboquant-2bit-kv-cache
+git switch feature/turboquant-prefill-cuda
 git rev-parse HEAD
 mkdir -p turboquant-logs
 set -o pipefail
@@ -142,7 +144,7 @@ The new cases cover codec block layouts, fixed IDs, zero input, golden packed by
 
 CUDA cases cover I32/I64 row indices, multiple blocks per row, untouched rows, strided source views, sequences, all 12 cache pairs, grouped-query attention, masked prefill, odd query counts, longer-cache decode, and rejected head sizes/types. They compare cache writes to scalar encoding and attention to a separate F32 CPU graph decoded from the same encoded cache bytes, including the TBQP3 correction. The attention comparison retains the NMSE threshold of `5e-4`. The test harness uses a dedicated evaluation override because the production CPU backend deliberately rejects TurboQuant operators. TURBO2 scalar cases independently compute the rotation with a Walsh matrix, verify corrected norms, packed codes and group boundaries, and check spatial versus transformed-domain dot products.
 
-Check that TurboQuant cases actually executed. A green exit with every case marked unsupported is not validation. With the complete pair list above, expect 16 CUDA cache-write cases, 48 CUDA attention comparisons, and 6 expected-rejection cases. Existing Bonsai regressions remain in the suite. Missing-pair selective builds should report unsupported cases and reject the corresponding server configuration.
+Check that TurboQuant cases actually executed. A green exit with every case marked unsupported is not validation. With the complete pair list above, expect 16 CUDA cache-write cases, 89 CUDA attention comparisons, and 6 expected-rejection cases. Existing Bonsai regressions remain in the suite. Missing-pair selective builds should report unsupported cases and reject the corresponding server configuration. The prefill additions cover 8-row tiles, 17-row tails, GQA ratios 1/2/6/8, contiguous and strided caches, ALiBi, softcap, sinks, a broadcast mask across sequences, and a 1025-query case that exercises mask-bound scanning. Run the forced-split builds below to cover both partition paths deterministically.
 
 ## Manual model and endpoint validation
 
@@ -277,7 +279,139 @@ Perplexity, long-context quality, RAM, VRAM, and tokens/second are all **PENDING
 
 Report the exact commit, commands, model filename, successful baseline results, regression counts, and relevant logs. Corrections will be limited to the reported source issue and returned for another user-managed build.
 
+## CUDA prefill optimization and manual A/B validation
+
+### User-supplied baseline
+
+The user measured Bonsai 2 Heretic 27B PTQ1_0 on RTX 3070 8 GB, sm_86, CUDA 12.8, build `ef52091d3`, with `-ngl 99 -fa 1 -p 4096 -n 256 -r 3`:
+
+| K/V pair | pp4096 tokens/s | tg256 tokens/s |
+|---|---:|---:|
+| Q4_1/Q4_1 | 870.36 | 53.45 |
+| TBQ3/TBQ3 | 138.37 | 46.32 |
+
+These are user-reported results for the earlier build, not measurements made during development. Prefill was approximately 6.29x slower; decode throughput was approximately 13.3% lower. The Q4_1 result is a comparison baseline, not a promised target. Every optimization below is **PENDING USER VALIDATION**.
+
+### Implemented changes
+
+1. Wider vector query tiles: TurboQuant prefill uses 8 queries per block when at least 8 queries are present. Each decoded V vector is reused across those queries. `GGML_CUDA_TBQ_PREFILL_ROWS=2/4/8` permits independent comparisons; 8 is the initial default, not a measured optimum. Small batches retain the previous 1/2-query path. Batch-invariant mode retains the earlier path. This change does not itself share K decoding between queries or reuse cache reads across GQA heads.
+2. Deferred V inverse: for wide prefill with multiple KV partitions, partial numerators stay in V's transformed basis. The combiner applies the same maximum-based softmax rescaling and denominator, then performs the inverse once per output query/head. Linearity makes this equivalent in real arithmetic; floating-point ordering changes still require numerical regression. The single-partition and decode paths retain their previous inverse placement. `GGML_CUDA_TBQ_DEFER_V=OFF` restores the previous placement.
+3. Shared Q preparation: wide split-prefill prepares each query/head once, including the two TBQP3 centroid/QJL query projections, rather than rotating Q in every KV partition. It respects source strides and attention scale, including softcap scaling. A temporary F32 query buffer holds 256 values per query/head, or 512 for TBQP3. K/V remain compressed. No query buffer is allocated for decode, small batches, batch-invariant mode, or a single partition. `GGML_CUDA_TBQ_PRE_ROTATE_Q=OFF` disables it independently of V placement.
+4. Mask-scanner bounds: the shared mask-bound scanner now ignores rows outside the query count in a partial tile and broadcasts its sequence index consistently with attention. This addresses out-of-bounds reads exposed by odd query counts and sequence-broadcast masks. Valid mask values and attention math are unchanged; the fix also applies to conventional attention using this scanner.
+5. Partition sizing: when a split-prefill variant is available, the occupancy query uses that candidate kernel rather than the unprepared variant. Forced single-partition validation uses the ordinary kernel. Actual partition efficiency still needs target profiling.
+
+The new paths support all 12 existing TurboQuant pairs, including mixed TURBO2 128-element and TBQ 256-element rotations. They introduce no new attention approximation, precision mode, weight transform, GGML type, or full-cache F16 conversion. Conventional attention dispatch stays unchanged. The one-query decode kernel remains the earlier specialization with both optimization flags false; measured tg256 still needs comparison after rebuilding.
+
+| Build control | Default | Purpose |
+|---|---|---|
+| `GGML_CUDA_TBQ_PREFILL_ROWS` | `8` | Select 2, 4, or 8 query rows per block |
+| `GGML_CUDA_TBQ_DEFER_V` | `ON` | Apply V inverse after wide split-prefill combination |
+| `GGML_CUDA_TBQ_PRE_ROTATE_Q` | `ON` | Share wide split-prefill Q rotations |
+| `GGML_CUDA_TBQ_SPLIT_KV` | `0` | Automatic partitions; 1/2/4/8 force a count for validation, clamped to available KV tiles |
+
+Forced partitions are for diagnosis and regression coverage. Restore 0 for performance comparisons. They also affect TurboQuant decode partitioning when explicitly set, so forced-split measurements are not the production decode baseline. None of these controls changes conventional cache partitioning.
+
+### Investigated and deferred
+
+- GQA reuse: query heads that share a KV head currently run in separate vector blocks. A grouped-head tile could reuse the same K/V data, but needs new head-to-query indexing, per-head ALiBi slopes, query strides, output metadata, masking, and combination tests. It is not implemented in this increment. The regression matrix now includes GQA 1/2/6/8 to protect that future work.
+- Native MMA: the existing in-place quantized MMA reader supports only Q4_0/Q8_0, a single shared K/V type, and its own block/alignment assumptions. TurboQuant requires separate K/V type parameters, 98/130/100/34-byte-aware tile readers, query rotation, independent V inverse, and explicit TBQP3 QJL products. A future path should decode only the current tile, reuse it across query rows and GQA heads, and retain vector fallback. Any F16 tile rounding must be assessed against the same-byte F32 reference before enabling it. Changing the selector alone would be incorrect. No TurboQuant MMA path is claimed or enabled here.
+- Packed-data loading: TBQ3 crosses byte boundaries and its 98-byte blocks are only guaranteed 2-byte alignment. Specialized loads may help, but are deferred until target profiling shows the decoder is material. This increment keeps the reference-compatible packing and readers unchanged; no unmeasured loading rewrite is presented as an improvement.
+- Cooperative writers and warp-shuffle WHTs: the current SET_ROWS writer handles an entire codec block in each thread, while attention WHTs use shared-memory barriers. These are profiling candidates, not implemented optimizations.
+
+Larger tiles increase register use and shared memory; 8 rows can lose occupancy or spill, particularly with TBQP3's extra query projection. Shared Q preparation adds a kernel launch, a temporary allocation, and query-buffer traffic; its benefit depends on the actual partition count. Deferred V helps only when multiple partitions are used. None of these effects can be ranked reliably from source inspection alone.
+
+### Manual builds and comparisons
+
+Run the following only on the Debian CUDA server, after transferring the local branch. No dependencies or models are downloaded. These commands configure CUDA 12.8 for sm_86, keep FA enabled, and limit build parallelism to two. Build directories are separate so variants can be compared without changing binaries between runs.
+
+```bash
+git switch feature/turboquant-prefill-cuda
+export BONSAI_MODEL='/absolute/path/Ternary-Bonsai-2-27B-Uncensored-Heretic-PTQ1_0.gguf'
+mkdir -p turboquant-logs
+set -o pipefail
+
+TBQ_PREFILL_FA_PAIRS='f16-f16;q4_1-q4_1;q5_0-q5_0;tbq3_0-tbq3_0;tbq3_0-tbq4_0;tbq4_0-tbq3_0;tbq4_0-tbq4_0;tbqp3_0-tbq3_0;tbqp3_0-tbq4_0;turbo2_0-turbo2_0;turbo2_0-tbq3_0;turbo2_0-tbq4_0;tbq3_0-turbo2_0;tbq4_0-turbo2_0;tbqp3_0-turbo2_0'
+
+configure_tbq_variant() {
+  local tq_name=$1 tq_rows=$2 tq_defer=$3 tq_rotate=$4 tq_split=${5:-0}
+  cmake -S . -B "build-tbq-${tq_name}" \
+    -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
+    -DCMAKE_CUDA_COMPILER=/usr/local/cuda-12.8/bin/nvcc \
+    -DCUDAToolkit_ROOT=/usr/local/cuda-12.8 \
+    -DCMAKE_CUDA_ARCHITECTURES=86 -DGGML_CUDA_FA=ON \
+    -DGGML_CUDA_NCCL=OFF -DLLAMA_BUILD_TESTS=ON \
+    -DGGML_CUDA_FA_QUANTS="$TBQ_PREFILL_FA_PAIRS" \
+    -DGGML_CUDA_TBQ_PREFILL_ROWS="$tq_rows" \
+    -DGGML_CUDA_TBQ_DEFER_V="$tq_defer" \
+    -DGGML_CUDA_TBQ_PRE_ROTATE_Q="$tq_rotate" \
+    -DGGML_CUDA_TBQ_SPLIT_KV="$tq_split" \
+    2>&1 | tee "turboquant-logs/configure-${tq_name}.log" || return
+  cmake --build "build-tbq-${tq_name}" --parallel 2 \
+    --target llama-bench llama-server test-backend-ops test-quantize-fns test-arg-parser test-gguf \
+    2>&1 | tee "turboquant-logs/build-${tq_name}.log"
+}
+
+configure_tbq_variant legacy2 2 OFF OFF
+configure_tbq_variant rows8 8 OFF OFF
+# Compare these next after validating the first two variants:
+configure_tbq_variant defer-v 8 ON OFF
+configure_tbq_variant all 8 ON ON
+# Exercise Q preparation with the earlier V placement as well:
+configure_tbq_variant q-only 8 OFF ON
+# Optional occupancy comparison:
+configure_tbq_variant rows4 4 OFF OFF
+# Deterministic coverage of single-partition and split-prefill paths:
+configure_tbq_variant split1 8 ON ON 1
+configure_tbq_variant split2 8 ON ON 2
+```
+
+If a build fails, retain the first full compiler error and stop that variant. The CUDA/glibc declaration conflict discussed above still applies; this branch does not alter the installed toolkit. `legacy2` reproduces the earlier vector policy on the current codecs; it is not a claim of binary identity with `ef52091d3`.
+
+Run regressions on each successfully built variant. Expected TurboQuant-specific counts are 16 writes, 89 attention comparisons, and 6 rejection cases. All comparisons must execute rather than report unsupported. In particular, `split1` and `split2` must both pass the same-byte F32 reference at the existing `5e-4` NMSE threshold. Keep the original Bonsai cases:
+
+```bash
+for tq_variant in legacy2 rows8 defer-v all q-only rows4 split1 split2; do
+  "build-tbq-${tq_variant}/bin/test-quantize-fns" -v \
+    2>&1 | tee "turboquant-logs/quantize-${tq_variant}.log"
+  "build-tbq-${tq_variant}/bin/test-arg-parser" \
+    2>&1 | tee "turboquant-logs/args-${tq_variant}.log"
+  "build-tbq-${tq_variant}/bin/test-gguf" 12345 \
+    2>&1 | tee "turboquant-logs/gguf-${tq_variant}.log"
+  "build-tbq-${tq_variant}/bin/test-backend-ops" test -b CUDA0 \
+    -o SET_ROWS,FLASH_ATTN_EXT -p 'type_k=(turbo2|tbq|f16)' \
+    2>&1 | tee "turboquant-logs/attention-${tq_variant}.log"
+  "build-tbq-${tq_variant}/bin/test-backend-ops" test -b CUDA0 \
+    -o MUL_MAT,GET_ROWS -p 'ptq1_0|pq2_0' \
+    2>&1 | tee "turboquant-logs/bonsai-${tq_variant}.log"
+done
+
+GGML_CUDA_BATCH_INVARIANT=1 build-tbq-all/bin/test-backend-ops test -b CUDA0 \
+  -o FLASH_ATTN_EXT -p 'type_k=(turbo2|tbq)' \
+  2>&1 | tee turboquant-logs/attention-batch-invariant.log
+```
+
+Select only built and passing variants for performance measurements. Keep model, driver, clock/power conditions, batch/microbatch settings, and other workload activity identical. Preserve full output, including the bench header and actual batch defaults. Stop the server first. The following matches the supplied benchmark arguments; it does not silently add different batch sizes:
+
+```bash
+git rev-parse HEAD | tee turboquant-logs/prefill-commit.log
+for tq_variant in legacy2 rows8 defer-v all q-only rows4; do
+  for tq_pair in q4_1:q4_1 tbq3:tbq3; do
+    tq_k=${tq_pair%:*}
+    tq_v=${tq_pair#*:}
+    "build-tbq-${tq_variant}/bin/llama-bench" -m "$BONSAI_MODEL" \
+      -ngl 99 -fa 1 -p 4096 -n 256 -r 3 -ctk "$tq_k" -ctv "$tq_v" \
+      2>&1 | tee "turboquant-logs/pp4096-${tq_variant}-${tq_k}-${tq_v}.log"
+  done
+done
+```
+
+Repeat passing variants with `tbq4:tbq4`, `tbqp3:tbq3`, `turbo2:tbq3`, and `turbo2:turbo2`, and at shorter/longer prompt sizes to distinguish fixed preparation overhead from context-scaling cost. Retain the earlier server endpoint, repeated-request, RAM/VRAM, and long-context quality checks. The first acceptance question is whether pp4096 materially improves over the fresh `legacy2` run without a material tg256 regression; no improvement is assumed in advance.
+
+If target profiling tools are already available, record the selected `flash_attn_ext_vec` query-row count, actual KV partition count, registers/thread, spills/local-memory traffic, occupancy, DRAM traffic, WHT barrier stalls, and time in `k_turboquant_prepare_q` and `flash_attn_combine_results`. This determines whether to retain 4 or 8 rows, enable Q preparation, pursue packed readers, or start native MMA/GQA tiling. Record compiler/runtime failures and return their logs for targeted corrections. All current optimization results remain **PENDING USER VALIDATION**.
+
 ## Changed files
+
+The prefill addition changes these seven existing files relative to `57e1458b35a18be2307fc407bd79f8d007e20868`: this document, `ggml/CMakeLists.txt`, `ggml/src/ggml-cuda/CMakeLists.txt`, `ggml/src/ggml-cuda/fattn-common.cuh`, `ggml/src/ggml-cuda/fattn-vec.cuh`, `ggml/src/ggml-cuda/turboquant.cuh`, and `tests/test-backend-ops.cpp`. No new test file is added.
 
 The 2-bit addition changes these 29 files relative to parent `ef52091d3f54cece74b07115cdec9a27742f106c`:
 

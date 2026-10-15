@@ -7866,15 +7866,23 @@ struct test_turboquant_reference : public test_case {
     const ggml_type index_type;
     const int64_t head_size;
     const bool expect_unsupported;
+    const int64_t gqa_ratio;
+    const float max_bias;
+    const float logit_softcap;
+    const bool sinks;
+    const bool broadcast_mask;
 
-    test_turboquant_reference(ggml_type k, ggml_type v, int64_t q, int64_t seq, int64_t kv, bool masked = true, int64_t dim = 256, bool unsupported = false)
-        : type_k(k), type_v(v), queries(q), sequences(seq), cache_size(kv), mask(masked), write(false), view(true), index_type(GGML_TYPE_I64), head_size(dim), expect_unsupported(unsupported) {}
+    test_turboquant_reference(ggml_type k, ggml_type v, int64_t q, int64_t seq, int64_t kv, bool masked = true, int64_t dim = 256, bool unsupported = false,
+            int64_t gqa = 6, bool cache_view = true, float bias = 0.0f, float softcap = 0.0f, bool with_sinks = false, bool shared_mask = false)
+        : type_k(k), type_v(v), queries(q), sequences(seq), cache_size(kv), mask(masked), write(false), view(cache_view), index_type(GGML_TYPE_I64), head_size(dim), expect_unsupported(unsupported),
+          gqa_ratio(gqa), max_bias(bias), logit_softcap(softcap), sinks(with_sinks), broadcast_mask(shared_mask) {}
 
     test_turboquant_reference(ggml_type type, ggml_type idx, bool src_view)
-        : type_k(type), type_v(type), queries(0), sequences(2), cache_size(7), mask(false), write(true), view(src_view), index_type(idx), head_size(256), expect_unsupported(false) {}
+        : type_k(type), type_v(type), queries(0), sequences(2), cache_size(7), mask(false), write(true), view(src_view), index_type(idx), head_size(256), expect_unsupported(false),
+          gqa_ratio(6), max_bias(0.0f), logit_softcap(0.0f), sinks(false), broadcast_mask(false) {}
 
     std::string vars() override {
-        return VARS_TO_STR11(type_k, type_v, queries, sequences, cache_size, mask, write, view, index_type, head_size, expect_unsupported);
+        return VARS_TO_STR16(type_k, type_v, queries, sequences, cache_size, mask, write, view, index_type, head_size, expect_unsupported, gqa_ratio, max_bias, logit_softcap, sinks, broadcast_mask);
     }
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
@@ -7882,8 +7890,16 @@ struct test_turboquant_reference : public test_case {
             test_set_rows tc(GGML_TYPE_F32, type_k, index_type, {512, cache_size, 2, sequences}, {1, 1}, view ? 6 : 3, view);
             return tc.build_graph(ctx);
         }
-        test_flash_attn_ext tc(head_size, head_size, 4, {6, sequences}, cache_size, queries, mask, false, 0, 0, GGML_PREC_F32, type_k, type_v, {0, 2, 1, 3}, view);
-        return tc.build_graph(ctx);
+        test_flash_attn_ext tc(head_size, head_size, 4, {gqa_ratio, sequences}, cache_size, queries, mask, sinks, max_bias, logit_softcap, GGML_PREC_F32, type_k, type_v, {0, 2, 1, 3}, view);
+        ggml_tensor * out = tc.build_graph(ctx);
+        if (broadcast_mask) {
+            ggml_tensor * m = out->src[3];
+            GGML_ASSERT(m);
+            ggml_set_name(m, "m_full");
+            out->src[3] = ggml_view_4d(ctx, m, m->ne[0], m->ne[1], 1, 1, m->nb[1], m->nb[2], m->nb[3], 0);
+            ggml_set_name(out->src[3], "m");
+        }
+        return out;
     }
 
     test_status_t eval(ggml_backend_t backend, ggml_backend_t cpu, const char * filter, printer * output_printer) override {
@@ -7962,20 +7978,21 @@ struct test_turboquant_reference : public test_case {
         // Decode the same cache bytes into a separate F32 CPU reference graph.
         ggml_context_ptr ref_ctx(ggml_init(params));
         GGML_ASSERT(ref_ctx);
-        ggml_tensor * inputs[4] = {};
-        for (int i = 0; i < 4; ++i) {
+        ggml_tensor * inputs[5] = {};
+        for (int i = 0; i < 5; ++i) {
             if (out->src[i]) {
                 inputs[i] = ggml_new_tensor(ref_ctx.get(), i == 3 ? GGML_TYPE_F16 : GGML_TYPE_F32, 4, out->src[i]->ne);
             }
         }
-        ggml_tensor * ref_out = ggml_flash_attn_ext(ref_ctx.get(), inputs[0], inputs[1], inputs[2], inputs[3], 1.0f/16.0f, 0.0f, 0.0f);
+        ggml_tensor * ref_out = ggml_flash_attn_ext(ref_ctx.get(), inputs[0], inputs[1], inputs[2], inputs[3], 1.0f/sqrtf(head_size), max_bias, logit_softcap);
+        ggml_flash_attn_ext_add_sinks(ref_out, inputs[4]);
         ggml_cgraph * ref_graph = ggml_new_graph(ref_ctx.get());
         ggml_build_forward_expand(ref_graph, ref_out);
         ggml_backend_buffer_ptr ref_buffer(ggml_backend_alloc_ctx_tensors(ref_ctx.get(), cpu));
         if (!ref_buffer) {
             return report(true, false, "reference allocation failed");
         }
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             if (!inputs[i]) {
                 continue;
             }
@@ -10906,12 +10923,23 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
             }
         }
         for (ggml_type v : {GGML_TYPE_TURBO2_0, GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0}) {
-            for (int64_t queries : {1, 3, 16}) {
+            for (int64_t queries : {1, 3, 8, 16, 17}) {
                 test_cases.emplace_back(new test_turboquant_reference(k, v, queries, 2, 512));
             }
             test_cases.emplace_back(new test_turboquant_reference(k, v, 1, 1, 4096, false));
         }
     }
+
+    for (ggml_type k : {GGML_TYPE_TBQ3_0, GGML_TYPE_TBQP3_0, GGML_TYPE_TURBO2_0}) {
+        const ggml_type v = k == GGML_TYPE_TURBO2_0 ? GGML_TYPE_TURBO2_0 : GGML_TYPE_TBQ3_0;
+        for (int64_t gqa : {1, 2, 8}) {
+            test_cases.emplace_back(new test_turboquant_reference(k, v, 9, 2, 512, true, 256, false, gqa, false));
+        }
+        test_cases.emplace_back(new test_turboquant_reference(k, v, 7, 1, 512, false));
+        test_cases.emplace_back(new test_turboquant_reference(k, v, 33, 1, 512, true, 256, false, 6, true, 8.0f, 10.0f, true));
+    }
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ3_0, 1025, 1, 1280, true, 256, false, 1));
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ3_0, 17, 2, 512, true, 256, false, 6, true, 0, 0, false, true));
 
     test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ4_0, GGML_TYPE_TBQ4_0, 1, 1, 256, true, 512, true));
     test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ4_0, GGML_TYPE_TBQP3_0, 1, 1, 256, true, 256, true));
