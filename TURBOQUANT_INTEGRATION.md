@@ -1,6 +1,6 @@
 # TurboQuant KV cache integration
 
-Status: the user reports successful compilation and completed TBQ3/TBQ3 and TURBO2/TURBO2 benchmarks on RTX 3070 for source build `07e356886`, following the VMM lifetime correction. Numerical regression, output quality, other cache pairs, and the benefit of each optimization remain **PENDING USER VALIDATION**. The build-option values and a fresh Q4_1 baseline for that build have not yet been supplied. Results for both `ef52091d3` and `07e356886` are recorded below. Development performed source inspection and diff checks only. No builds, CMake, tests, project binaries, CUDA code, inference, or source generators were executed on the development machine.
+Status: the user reports successful compilation and completed TBQ3/TBQ3 and TURBO2/TURBO2 benchmarks on RTX 3070 for source build `07e356886`, following the VMM lifetime correction. The user confirmed 8-row tiles, deferred V inverse ON, Q preparation ON, and automatic KV partitioning. Numerical regression, output quality, other cache pairs, and the benefit of each optimization remain **PENDING USER VALIDATION**. A fresh Q4_1 baseline for that build has not yet been supplied. Results for both `ef52091d3` and `07e356886` are recorded below. Development performed source inspection and diff checks only. No builds, CMake, tests, project binaries, CUDA code, inference, or source generators were executed on the development machine.
 
 ## Scope and architecture
 
@@ -294,7 +294,16 @@ These are user-reported results for the earlier build, not measurements made dur
 
 ### User-supplied results after the VMM correction
 
-The user subsequently supplied these results for build `07e356886` (10793), the same Bonsai 2 PTQ1_0 model, and the same RTX 3070. Both outputs report `ngl=99`, FA enabled, pp4096, and tg256. The TBQ3 command explicitly uses `-r 3`. The `build-prefill` CMake optimization settings and numerical regression results have not yet been supplied.
+The user subsequently supplied these results for build `07e356886` (10793), the same Bonsai 2 PTQ1_0 model, and the same RTX 3070. Both outputs report `ngl=99`, FA enabled, pp4096, and tg256. The TBQ3 command explicitly uses `-r 3`. The user also supplied this `build-prefill/CMakeCache.txt` configuration:
+
+```text
+GGML_CUDA_TBQ_DEFER_V:BOOL=ON
+GGML_CUDA_TBQ_PREFILL_ROWS:STRING=8
+GGML_CUDA_TBQ_PRE_ROTATE_Q:BOOL=ON
+GGML_CUDA_TBQ_SPLIT_KV:STRING=0
+```
+
+The two transform optimizations are enabled at build time but execute only if the automatic policy selects multiple partitions for a wide prefill tile. The actual partition count and numerical regression results have not yet been supplied. A 4-row comparison with the other settings unchanged is the next small experiment to assess occupancy/register-pressure sensitivity; it is not a predicted improvement.
 
 | K/V pair | pp4096 tokens/s | tg256 tokens/s |
 |---|---:|---:|
@@ -339,7 +348,7 @@ The user's first prefill run of the new implementation aborted at `ggml-cuda.cu`
 
 The fix declares the buffers in allocation order: `KV_max`, `dst_tmp`, `dst_tmp_meta`, then `rotated_q`. Destruction therefore releases the rotated query buffer first. The VMM pool, attention arithmetic, and cache format are unchanged. Existing prefill regression cases with at least eight queries now compute the CUDA graph twice and compare each result to the same-byte F32 reference, covering repeated pool use. No new test file is added. Use `split2` with query preparation enabled to exercise this allocation path deterministically; keep VMM enabled for this check.
 
-After transferring this correction, rebuild the user's existing directory with `cmake --build build-prefill --parallel 2 --target llama-bench test-backend-ops`, then run `build-prefill/bin/test-backend-ops test -b CUDA0 -o FLASH_ATTN_EXT -p 'type_k=tbq3_0,type_v=tbq3_0,queries=(8|17),'` before repeating the original pp4096/tg256 command. The full regression and forced-partition commands below remain applicable. The user later reported completed TBQ3 and TURBO2 benchmark runs on `07e356886`, recorded above. Build-option values have not yet been provided, so validation of the forced-split prepared-query path, numerical equivalence, and isolated optimization gains remains **PENDING USER VALIDATION**.
+After transferring this correction, rebuild the user's existing directory with `cmake --build build-prefill --parallel 2 --target llama-bench test-backend-ops`, then run `build-prefill/bin/test-backend-ops test -b CUDA0 -o FLASH_ATTN_EXT -p 'type_k=tbq3_0,type_v=tbq3_0,queries=(8|17),'` before repeating the original pp4096/tg256 command. The full regression and forced-partition commands below remain applicable. The user later reported completed TBQ3 and TURBO2 benchmark runs on `07e356886` with 8 rows, both transform controls ON, and automatic partitioning. Validation of the forced-split prepared-query path, numerical equivalence, and isolated optimization gains remains **PENDING USER VALIDATION**.
 
 ### Manual builds and comparisons
 
