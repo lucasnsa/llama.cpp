@@ -1229,7 +1229,7 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 }
 
 bool llama_kv_cache::get_can_shift() const {
-    if (ggml_type_is_turboquant(type_k()) || ggml_type_is_turboquant(type_v())) {
+    if (!layers.empty() && ggml_type_is_turboquant(type_k())) {
         return false;
     }
     // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
