@@ -115,18 +115,20 @@ static void test(void) {
 
     std::vector<std::string> argv;
 
-    for (const std::string & k : {"tbq3", "tbq4", "tbqp3", "tbq3_0", "tbq4_0", "tbqp3_0"}) {
-        for (const std::string & v : {"tbq3", "tbq4", "tbq3_0", "tbq4_0"}) {
+    for (const std::string & k : {"turbo2", "turbo2_0", "tbq3", "tbq4", "tbqp3", "tbq3_0", "tbq4_0", "tbqp3_0"}) {
+        for (const std::string & v : {"turbo2", "turbo2_0", "tbq3", "tbq4", "tbq3_0", "tbq4_0"}) {
             common_params cache_params;
             argv = {"binary_name", "--cache-type-k", k, "--cache-type-v", v};
             assert(common_params_parse(argv.size(), list_str_to_char(argv).data(), cache_params, LLAMA_EXAMPLE_SERVER));
-            assert(cache_params.cache_type_k == (k.find("tbqp3") == 0 ? GGML_TYPE_TBQP3_0 : k.find("tbq4") == 0 ? GGML_TYPE_TBQ4_0 : GGML_TYPE_TBQ3_0));
-            assert(cache_params.cache_type_v == (v.find("tbq4") == 0 ? GGML_TYPE_TBQ4_0 : GGML_TYPE_TBQ3_0));
+            assert(cache_params.cache_type_k == (k.find("turbo2") == 0 ? GGML_TYPE_TURBO2_0 : k.find("tbqp3") == 0 ? GGML_TYPE_TBQP3_0 : k.find("tbq4") == 0 ? GGML_TYPE_TBQ4_0 : GGML_TYPE_TBQ3_0));
+            assert(cache_params.cache_type_v == (v.find("turbo2") == 0 ? GGML_TYPE_TURBO2_0 : v.find("tbq4") == 0 ? GGML_TYPE_TBQ4_0 : GGML_TYPE_TBQ3_0));
         }
     }
     for (const std::vector<std::string> & pair : std::vector<std::vector<std::string>>{
             {"tbqp3", "tbqp3"}, {"tbq4", "tbqp3_0"}, {"tbq4", "f16"},
-            {"q4_1", "tbq4"}, {"unknown", "tbq3"}}) {
+            {"q4_1", "tbq4"}, {"unknown", "tbq3"}, {"turbo2", "tbqp3"},
+            {"turbo2", "q4_1"}, {"f16", "turbo2_0"}, {"tbq2", "tbq3"},
+            {"turbo2_1", "tbq3"}}) {
         common_params cache_params;
         argv = {"binary_name", "--cache-type-k", pair[0], "--cache-type-v", pair[1]};
         assert(!common_params_parse(argv.size(), list_str_to_char(argv).data(), cache_params, LLAMA_EXAMPLE_SERVER));

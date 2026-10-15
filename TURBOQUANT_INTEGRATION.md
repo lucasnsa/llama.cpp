@@ -1,6 +1,6 @@
 # TurboQuant KV cache integration
 
-Status: **PENDING USER VALIDATION** for compilation, regression execution, model inference, numerical correctness, benchmarks, and GPU compatibility. Development performed source inspection and diff checks only. No builds, tests, project binaries, or inference were executed.
+Status: **PENDING USER VALIDATION** for compilation, regression execution, model inference, numerical correctness, benchmarks, and GPU compatibility. Development performed source inspection and diff checks only. No builds, CMake, tests, project binaries, CUDA code, inference, or source generators were executed.
 
 ## Scope and architecture
 
@@ -8,9 +8,23 @@ This is a Bonsai-first integration for a personal PrismML fork. The implementati
 
 Reference: [jarkevithwlad/turboquant-prismml-cuda](https://github.com/jarkevithwlad/turboquant-prismml-cuda), pinned to `f7d1a4381104ed72cca090f8f0b56633fbebd620`. Relevant history includes `45a2ef747c3b8bb56bd44787ae39af1d59508519` (reference rebase), `1bc46807d98df97d94ce37a7934e70a314c72eac` (normalization and V rotation corrections), and `0bfe33411f7af381964510d083a0d8ee047201ef` (external/internal rotation interaction). These are provenance references, not commits merged into this branch. The reference's attention-sharpening heuristic, AMX types, other head dimensions, FP8 type remapping, and unrelated server changes are excluded.
 
-Cache writes use the existing CUDA SET_ROWS interface. Each 256-element block receives deterministic sign flips, a Walsh-Hadamard transform, and Lloyd-Max scalar quantization. TBQP3 stores a 2-bit centroid index and a 1-bit QJL residual projection. Shared internal codec routines keep the CPU reference and CUDA writer tables and packing consistent.
+The 2-bit addition is on local branch `feature/turboquant-2bit-kv-cache`, descended from `feature/turboquant-kv-cache` at `ef52091d3f54cece74b07115cdec9a27742f106c`. It preserves the earlier 3-bit and 4-bit integration. Neither this addition nor its validation commands require merging or synchronizing upstream.
+
+Cache writes use the existing CUDA SET_ROWS interface and its per-block writer dispatch. TBQ3, TBQ4, and TBQP3 use 256-element blocks with deterministic sign flips, a Walsh-Hadamard transform, and Lloyd-Max scalar quantization. TBQP3 stores a 2-bit centroid index and a 1-bit QJL residual projection. Shared internal codec routines keep the CPU reference and CUDA writer tables and packing consistent.
 
 Attention uses the existing vector Flash Attention kernel for both prefill and decode. It transforms Q once per query, evaluates compressed K directly, accumulates V in the transformed domain, and applies an inverse transform to the result. TBQP3 additionally transforms Q for its QJL correction. Normalization matches the reference: the centroid query uses `scale/256`, the QJL query uses `scale*1.2533/(256*256)`, and the V output uses `1/256`. The scalar TBQP3 decoder reconstructs this same linear estimator.
+
+### Pure 2-bit source and encoding
+
+The pinned PrismML reference contains no pure 2-bit KV type. AmesianX's inspected reference snapshot `570f5e790b12923a2b9a454a7a4f4637239ac772` also has no suitable pure 2-bit type, and its README marks that project discontinued. Official llama.cpp snapshot `fd55cb98fe29d3df0054d3f3e6e6f15958ea72ab` contains no native TurboQuant type. PQ2_0 remains a Bonsai weight format, not a TurboQuant cache alias. Sources: [PrismML types](https://github.com/jarkevithwlad/turboquant-prismml-cuda/blob/f7d1a4381104ed72cca090f8f0b56633fbebd620/ggml/include/ggml.h), [AmesianX](https://github.com/AmesianX/TurboQuant/tree/570f5e790b12923a2b9a454a7a4f4637239ac772), [official llama.cpp types](https://github.com/ggml-org/llama.cpp/blob/fd55cb98fe29d3df0054d3f3e6e6f15958ea72ab/ggml/include/ggml.h).
+
+The usable source is [TheTom/llama-cpp-turboquant](https://github.com/TheTom/llama-cpp-turboquant/tree/ca28b4bc0e531635d83fe530c6e6e8d694c4330d), pinned to `ca28b4bc0e531635d83fe530c6e6e8d694c4330d`. That fork was receiving updates at inspection time; this does not establish Bonsai accuracy or GPU compatibility. Its actual `QK_TURBO2=128` structure is 34 bytes, despite stale comments describing an older 32-value/10-byte layout. See [block definitions](https://github.com/TheTom/llama-cpp-turboquant/blob/ca28b4bc0e531635d83fe530c6e6e8d694c4330d/ggml/src/ggml-common.h) and [scalar codecs](https://github.com/TheTom/llama-cpp-turboquant/blob/ca28b4bc0e531635d83fe530c6e6e8d694c4330d/ggml/src/ggml-turbo-quant.c).
+
+TURBO2_0 is a 2-bit PolarQuant codec in that TurboQuant fork. Each group stores one FP16 corrected norm followed by 32 bytes of indices, with four indices per byte and the first index in the lowest two bits. The four centroids are `{-0.133462, -0.039994, 0.039994, 0.133462}`; thresholds are `{-0.086728, 0, 0.086728}` with ties selecting the higher index. Forward rotation is `S2 * H128 * S1 / sqrt(128)`, using the source's fixed signs. The stored norm is the original L2 norm divided by the norm of the selected centroid vector. No residual or QJL bits are present. A zero group has norm zero and index bytes `0xaa`.
+
+For a 256-dimensional head, TURBO2 uses two independent groups. Query rotation follows K's type, while inverse V rotation follows V's type, so mixed 128-group/256-group pairs remain valid. The basic source decoder emits rotated coordinates; this port's scalar `to_float` also applies the inverse rotation to provide spatial F32 references. The compressed bytes and corrected norm retain the source representation. CPU inference remains unsupported. No global rotation-group setting, padding to other head dimensions, InnerQ calibration, adaptive layers, or additional GGML operator is imported.
+
+The source has CUDA K and V support, including a [256-head native instance](https://github.com/TheTom/llama-cpp-turboquant/blob/ca28b4bc0e531635d83fe530c6e6e8d694c4330d/ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo2_0-turbo2_0.cu). This port reuses PrismML's existing CUDA writer dispatch and vector attention rather than importing the fork's streaming and matrix-attention subsystems. Writer throughput and prefill performance are unmeasured.
 
 External KV rotation is disabled only for TurboQuant caches. The separate Bonsai weight Hadamard transformations are preserved. Existing attention scaling, masking, softmax, and server endpoints are unchanged. TurboQuant is limited to attention KV state; Bonsai's recurrent state is unchanged.
 
@@ -27,20 +41,42 @@ The context checks cache pair, placement, head dimensions, and compiled CUDA cap
 | TBQ3_0 | 144 | 256 | 98 | 3.0625 |
 | TBQ4_0 | 145 | 256 | 130 | 4.0625 |
 | TBQP3_0 | 146 | 256 | 100 | 3.125 |
+| TURBO2_0 | 147 | 128 | 34 | 2.125 |
 
-`GGML_TYPE_COUNT` is 147. No existing GGUF tensor or model file-type identifiers are reassigned. Rebuild the libraries and tools together after changing the enum. The reference's IDs and Q2_0 loader remapping are not used. The model loader and model quantizer reject TurboQuant weight types.
+`GGML_TYPE_COUNT` is 148. No existing GGUF tensor or model file-type identifiers are reassigned. Rebuild the libraries and tools together after changing the enum. Neither reference's type IDs nor Q2_0 loader remapping are used. The model loader and model quantizer reject TurboQuant weight types.
 
 | K argument | V arguments |
 |---|---|
-| `tbq3` or `tbq3_0` | `tbq3`, `tbq3_0`, `tbq4`, `tbq4_0` |
-| `tbq4` or `tbq4_0` | `tbq3`, `tbq3_0`, `tbq4`, `tbq4_0` |
-| `tbqp3` or `tbqp3_0` | `tbq3`, `tbq3_0`, `tbq4`, `tbq4_0` |
+| `turbo2` or `turbo2_0` | `turbo2`, `turbo2_0`, `tbq3`, `tbq3_0`, `tbq4`, `tbq4_0` |
+| `tbq3` or `tbq3_0` | `turbo2`, `turbo2_0`, `tbq3`, `tbq3_0`, `tbq4`, `tbq4_0` |
+| `tbq4` or `tbq4_0` | `turbo2`, `turbo2_0`, `tbq3`, `tbq3_0`, `tbq4`, `tbq4_0` |
+| `tbqp3` or `tbqp3_0` | `turbo2`, `turbo2_0`, `tbq3`, `tbq3_0`, `tbq4`, `tbq4_0` |
 
 Requirements: NVIDIA CUDA backend, Flash Attention enabled, 256-dimensional K and V attention heads, and CUDA KV buffers for every attention layer. `-fa auto` enables FA through the existing quantized-V rule; use `-fa on` for validation. CPU codecs are provided for serialization and numerical references, not CPU TurboQuant inference.
 
 Not supported: TBQP3 V, mixed TurboQuant/conventional cache pairs, other head dimensions, MLA cache layouts, non-CUDA KV placement, and context shifting. The normal memory capability API reports shifting unavailable, allowing the server to disable it. Cache reuse without position changes remains available. Existing conventional cache types keep their behavior. TurboQuant state files are specific to this fork's type mapping.
 
 The reference-style vector path can be slower than the existing MMA attention path, especially during prefill. Memory savings, output quality, and speed on the RTX 3070 are unmeasured. A 32K cache fitting in 8 GB cannot be guaranteed before measuring the complete model, cache, and compute buffers.
+
+### Memory accounting and 2-bit accuracy risks
+
+"Pure 2-bit" refers to the index payload, not total storage: TURBO2 uses 2.125 bits/value including its FP16 norm. TBQP3 uses 2-bit indices plus a 1-bit QJL correction and two FP16 norms, totaling 3.125 bits/value. TBQP3 is not a substitute for TURBO2.
+
+| K/V pair | Bytes per 256-dimensional K/V head pair |
+|---|---:|
+| F16/F16 | 1024 |
+| Q4_1/Q4_1 | 320 |
+| TBQ4/TBQ4 | 260 |
+| TBQ3/TBQ3 | 196 |
+| TBQP3/TBQ3 | 198 |
+| TURBO2/TBQ3 | 166 |
+| TURBO2/TURBO2 | 136 |
+
+Uniform TURBO2 reduces KV payload by 47.7% versus TBQ4/TBQ4, 30.6% versus TBQ3/TBQ3, 57.5% versus Q4_1/Q4_1, and 86.7% versus F16/F16. TURBO2/TBQ3 saves 36.2% versus TBQ4/TBQ4. Multiply the bytes above by cached tokens, KV heads, and attention layers with KV state. The count must come from the actual model. Weights, recurrent state, compute buffers, alignment, and allocator overhead are separate; these are not total VRAM savings or a 32K fit guarantee.
+
+Uniform 2-bit V is experimental. The source fork normally substitutes Q8 V in boundary layers for turbo2-V on sufficiently deep models; see its [layer policy](https://github.com/TheTom/llama-cpp-turboquant/blob/ca28b4bc0e531635d83fe530c6e6e8d694c4330d/src/llama-kv-cache.cpp). At the user's request, this port makes no hidden precision substitutions: selecting `turbo2/turbo2` uses TURBO2 for every attention layer's K and V. Existing runtime cache defaults remain unchanged.
+
+Norm correction preserves reconstructed magnitude, not direction or exact attention logits. TURBO2 K has no QJL residual correction. Lower precision can affect retrieval and attention ordering; V error can alter the information delivered to later layers. Long coding sessions may expose wrong identifiers, lost distant constraints, inconsistent multi-file edits, or repetition. These are risks to evaluate, not measured Bonsai outcomes. Begin with `turbo2/tbq3` and compare `turbo2/turbo2` separately. Keep TBQ3/TBQ4 and the Q4_1 baseline available. A decoded-byte F32 attention match establishes kernel consistency, not model quality.
 
 ## Manual compilation on Debian 13
 
@@ -49,7 +85,7 @@ All commands below are for the user's compilation machine only. No dependencies 
 Run from the repository root in Bash. Adjust only the CUDA installation path if necessary. Two build jobs limit peak compiler memory on the approximately 16 GB RAM machine.
 
 ```bash
-git switch feature/turboquant-kv-cache
+git switch feature/turboquant-2bit-kv-cache
 git rev-parse HEAD
 mkdir -p turboquant-logs
 set -o pipefail
@@ -63,7 +99,7 @@ cmake -S . -B build-turboquant \
   -DGGML_CUDA_FA=ON \
   -DGGML_CUDA_NCCL=OFF \
   -DLLAMA_BUILD_TESTS=ON \
-  -DGGML_CUDA_FA_QUANTS='f16-f16;bf16-bf16;q4_0-q4_0;q4_1-q4_1;q5_0-q5_0;q8_0-q8_0;tbq3_0-tbq3_0;tbq3_0-tbq4_0;tbq4_0-tbq3_0;tbq4_0-tbq4_0;tbqp3_0-tbq3_0;tbqp3_0-tbq4_0' \
+  -DGGML_CUDA_FA_QUANTS='f16-f16;bf16-bf16;q4_0-q4_0;q4_1-q4_1;q5_0-q5_0;q8_0-q8_0;tbq3_0-tbq3_0;tbq3_0-tbq4_0;tbq4_0-tbq3_0;tbq4_0-tbq4_0;tbqp3_0-tbq3_0;tbqp3_0-tbq4_0;turbo2_0-turbo2_0;turbo2_0-tbq3_0;turbo2_0-tbq4_0;tbq3_0-turbo2_0;tbq4_0-turbo2_0;tbqp3_0-turbo2_0' \
   2>&1 | tee turboquant-logs/configure.log
 
 cmake --build build-turboquant --parallel 2 \
@@ -72,7 +108,7 @@ cmake --build build-turboquant --parallel 2 \
   2>&1 | tee turboquant-logs/build.log
 ```
 
-Fresh CUDA builds include all six TurboQuant pairs by default. Existing CMake caches keep their previous selection, so the explicit selection above is intentional. `GGML_CUDA_FA_QUANTS=all` includes the existing conventional pairs and the six supported TurboQuant pairs; it does not instantiate unsupported cross-products. A selective build may omit pairs, in which case context initialization reports the missing pair. HIP and MUSA keep their conventional pair set and ignore the CUDA-only TurboQuant entries.
+Fresh CUDA builds include all 12 TurboQuant pairs by default. Existing CMake caches keep their previous selection, so the explicit selection above is intentional. `GGML_CUDA_FA_QUANTS=all` includes the existing conventional pairs and the 12 supported TurboQuant pairs; it does not instantiate unsupported cross-products. A selective build may omit pairs, in which case context initialization reports the missing pair. For example, `-DGGML_CUDA_FA_QUANTS='q4_1-q4_1;turbo2_0-tbq3_0;turbo2_0-turbo2_0'` requests only those pairs plus the existing mandatory F16/F16 instance. HIP and MUSA keep their conventional pair set and ignore the CUDA-only TurboQuant entries.
 
 ### CUDA 12.8, glibc, and sinpi/cospi
 
@@ -90,7 +126,7 @@ build-turboquant/bin/test-arg-parser 2>&1 | tee turboquant-logs/arguments.log
 build-turboquant/bin/test-gguf 12345 2>&1 | tee turboquant-logs/gguf.log
 
 build-turboquant/bin/test-backend-ops test -b CUDA0 \
-  -o SET_ROWS,FLASH_ATTN_EXT -p 'type_k=(tbq|f16)' \
+  -o SET_ROWS,FLASH_ATTN_EXT -p 'type_k=(turbo2|tbq|f16)' \
   2>&1 | tee turboquant-logs/turboquant-ops.log
 
 build-turboquant/bin/test-backend-ops test -b CUDA0 \
@@ -104,9 +140,9 @@ build-turboquant/bin/test-backend-ops test -b CUDA0 \
 
 The new cases cover codec block layouts, fixed IDs, zero input, golden packed bytes, multiple blocks, chunk offsets, nonfinite scale rejection, QJL equivalence against a direct Walsh matrix calculation, CLI aliases and rejected pairs, and a synthetic PTQ1_0 `output.weight` GGUF round trip with tensor data.
 
-CUDA cases cover I32/I64 row indices, multiple blocks per row, untouched rows, strided source views, sequences, all six cache pairs, grouped-query attention, masked prefill, odd query counts, longer-cache decode, and rejected head sizes/types. They compare cache writes to scalar encoding and attention to a separate F32 CPU graph decoded from the same encoded cache bytes. The test harness uses a dedicated evaluation override because the production CPU backend deliberately rejects TurboQuant operators.
+CUDA cases cover I32/I64 row indices, multiple blocks per row, untouched rows, strided source views, sequences, all 12 cache pairs, grouped-query attention, masked prefill, odd query counts, longer-cache decode, and rejected head sizes/types. They compare cache writes to scalar encoding and attention to a separate F32 CPU graph decoded from the same encoded cache bytes, including the TBQP3 correction. The attention comparison retains the NMSE threshold of `5e-4`. The test harness uses a dedicated evaluation override because the production CPU backend deliberately rejects TurboQuant operators. TURBO2 scalar cases independently compute the rotation with a Walsh matrix, verify corrected norms, packed codes and group boundaries, and check spatial versus transformed-domain dot products.
 
-Check that TurboQuant cases actually executed. A green exit with every case marked unsupported is not validation. With the complete pair list above, expect 12 CUDA cache-write cases, 24 CUDA attention comparisons, and 3 expected-rejection cases. Existing Bonsai regressions remain in the suite. Missing-pair selective builds should report unsupported cases and reject the corresponding server configuration.
+Check that TurboQuant cases actually executed. A green exit with every case marked unsupported is not validation. With the complete pair list above, expect 16 CUDA cache-write cases, 48 CUDA attention comparisons, and 6 expected-rejection cases. Existing Bonsai regressions remain in the suite. Missing-pair selective builds should report unsupported cases and reject the corresponding server configuration.
 
 ## Manual model and endpoint validation
 
@@ -136,6 +172,18 @@ build-turboquant/bin/llama-server -m "$BONSAI_MODEL" \
   -c 32768 -ngl 99 -fa on -np 1 -b 512 -ub 128 \
   --host 127.0.0.1 --port 8080 \
   2>&1 | tee turboquant-logs/server-tbqp3-tbq3.log
+
+build-turboquant/bin/llama-server -m "$BONSAI_MODEL" \
+  --cache-type-k turbo2 --cache-type-v tbq3 \
+  -c 32768 -ngl 99 -fa on -np 1 -b 512 -ub 128 \
+  --host 127.0.0.1 --port 8080 \
+  2>&1 | tee turboquant-logs/server-turbo2-tbq3.log
+
+build-turboquant/bin/llama-server -m "$BONSAI_MODEL" \
+  --cache-type-k turbo2 --cache-type-v turbo2 \
+  -c 32768 -ngl 99 -fa on -np 1 -b 512 -ub 128 \
+  --host 127.0.0.1 --port 8080 \
+  2>&1 | tee turboquant-logs/server-turbo2-turbo2.log
 ```
 
 Check loading logs for `ptq1_0` tensors, the selected cache types, CUDA cache buffers, and Flash Attention. TurboQuant runs should report `attn_rot_k = 0` and `attn_rot_v = 0`; Bonsai weight transformations must still load normally. A context-shift-disabled message is expected.
@@ -161,6 +209,8 @@ curl --fail-with-body http://127.0.0.1:8080/v1/chat/completions \
 
 Repeat an identical request to exercise cache reuse, then alternate unrelated and shared-prefix requests. Test longer prompts below the 32K limit. Compare coherent output, request timing, and reuse logs; different quantizers need not produce identical tokens. To validate multiple slots at the server level, repeat with the same `-np 2` setting for each cache configuration and send two requests concurrently, noting the per-slot context in the log.
 
+For long-context coding quality, reuse identical local code and prompts at several lengths below 32K, leaving room for generated output. Place relevant identifiers and requirements near the beginning, middle, and end; ask for exact symbol retrieval, dependency reasoning, and patches that preserve earlier constraints. Record incorrect identifiers, missed requirements, repetitions, and patch correctness alongside timing. Repeat follow-ups sharing the same prefix. Compare Q4_1, TBQ4, TBQP3/TBQ3, TURBO2/TBQ3, and uniform TURBO2 with identical seeds, batches, and generation limits. Do not infer long-context coding quality from the short perplexity check alone.
+
 Expected startup rejections can be checked manually with the same model:
 
 ```bash
@@ -176,7 +226,7 @@ build-turboquant/bin/llama-server -m "$BONSAI_MODEL" -ngl 0 -c 512 -fa on -ctk t
 Stop the server before benchmarks. Run identical settings for each pair and retain both stdout and stderr:
 
 ```bash
-for pair in q4_1:q4_1 tbq4:tbq4 tbqp3:tbq3; do
+for pair in q4_1:q4_1 tbq4:tbq4 tbqp3:tbq3 turbo2:tbq3 turbo2:turbo2; do
   cache_k=${pair%:*}
   cache_v=${pair#*:}
   build-turboquant/bin/llama-bench -m "$BONSAI_MODEL" \
@@ -201,7 +251,7 @@ For a numerical quality comparison, use an existing local evaluation text; do no
 
 ```bash
 export BONSAI_EVAL_TEXT='/absolute/path/to/local/evaluation.txt'
-for pair in q4_1:q4_1 tbq4:tbq4 tbqp3:tbq3; do
+for pair in q4_1:q4_1 tbq4:tbq4 tbqp3:tbq3 turbo2:tbq3 turbo2:turbo2; do
   cache_k=${pair%:*}
   cache_v=${pair#*:}
   build-turboquant/bin/llama-perplexity -m "$BONSAI_MODEL" \
@@ -215,7 +265,8 @@ Perplexity, long-context quality, RAM, VRAM, and tokens/second are all **PENDING
 
 ## Troubleshooting and reporting
 
-- `invalid ggml type 143`: verify the executable came from this branch and its freshly rebuilt libraries. This branch keeps PTQ1_0=143 and COUNT=147. Do not convert or relabel model tensors to work around a stale executable.
+- `invalid ggml type 143`: verify the executable came from this branch and its freshly rebuilt libraries. This branch keeps PTQ1_0=143 and COUNT=148. Do not convert or relabel model tensors to work around a stale executable.
+- `turbo2` rejected or type 147 unknown: verify the branch and rebuild libraries and tools together. `tbq2` is not an alias; use `turbo2` or `turbo2_0`. TBQP3 is not a pure 2-bit replacement.
 - CUDA pair unavailable: inspect the CMake pair list and rebuild with `GGML_CUDA_FA=ON` and the required `_0` pair. Existing build caches do not pick up changed defaults automatically.
 - CUDA KV buffers required: keep every attention layer's KV cache on CUDA. Remove `--no-kv-offload`; inspect `-ngl` and actual placement. CPU-resident recurrent layers do not by themselves require TurboQuant CPU support.
 - Unsupported head size: this release requires 256 for K and V in attention layers. It does not silently choose another block format or F16.
@@ -227,6 +278,40 @@ Perplexity, long-context quality, RAM, VRAM, and tokens/second are all **PENDING
 Report the exact commit, commands, model filename, successful baseline results, regression counts, and relevant logs. Corrections will be limited to the reported source issue and returned for another user-managed build.
 
 ## Changed files
+
+The 2-bit addition changes these 29 files relative to parent `ef52091d3f54cece74b07115cdec9a27742f106c`:
+
+```text
+TURBOQUANT_INTEGRATION.md
+common/arg.cpp
+ggml/CMakeLists.txt
+ggml/cmake/common.cmake
+ggml/include/ggml.h
+ggml/src/ggml-common.h
+ggml/src/ggml-cuda/fattn-common.cuh
+ggml/src/ggml-cuda/fattn-vec.cuh
+ggml/src/ggml-cuda/fattn.cu
+ggml/src/ggml-cuda/set-rows.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbq3_0-turbo2_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbq4_0-turbo2_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbqp3_0-turbo2_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo2_0-tbq3_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo2_0-tbq4_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo2_0-turbo2_0.cu
+ggml/src/ggml-cuda/template-instances/generate_cu_files.py
+ggml/src/ggml-cuda/turboquant.cuh
+ggml/src/ggml-quants.c
+ggml/src/ggml-quants.h
+ggml/src/ggml-turboquant.h
+ggml/src/ggml.c
+gguf-py/gguf/constants.py
+src/llama-context.cpp
+tests/test-arg-parser.cpp
+tests/test-backend-ops.cpp
+tests/test-gguf.cpp
+tests/test-quantize-fns.cpp
+tools/llama-bench/llama-bench.cpp
+```
 
 The following inventory is relative to the PrismML base commit and includes regression files. No new file was added under `tests/`.
 
@@ -252,6 +337,12 @@ ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbq4_0-tbq3_0.cu
 ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbq4_0-tbq4_0.cu
 ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbqp3_0-tbq3_0.cu
 ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbqp3_0-tbq4_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo2_0-turbo2_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo2_0-tbq3_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-turbo2_0-tbq4_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbq3_0-turbo2_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbq4_0-turbo2_0.cu
+ggml/src/ggml-cuda/template-instances/fattn-vec-instance-tbqp3_0-turbo2_0.cu
 ggml/src/ggml-cuda/template-instances/generate_cu_files.py
 ggml/src/ggml-cuda/turboquant.cuh
 ggml/src/ggml-quants.c

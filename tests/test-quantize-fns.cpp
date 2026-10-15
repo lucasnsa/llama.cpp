@@ -283,6 +283,110 @@ static int test_vec_dot_ternary(bool verbose) {
     return num_failed;
 }
 
+static void test_turbo2() {
+    static_assert(GGML_TYPE_TURBO2_0 == 147 && GGML_TYPE_COUNT == 148, "TURBO2 tensor ID changed");
+    assert(ggml_blck_size(GGML_TYPE_TURBO2_0) == 128 && ggml_type_size(GGML_TYPE_TURBO2_0) == 34);
+    const uint32_t signs1[4] = {0xE46A0359u, 0x42F85949u, 0xA4C63BBBu, 0x49F250A9u};
+    const uint32_t signs2[4] = {0x16ACEE90u, 0x3F628FDCu, 0xB7A5357Au, 0xBEA56562u};
+    const float centroids[4] = {-0.133462f, -0.039994f, 0.039994f, 0.133462f};
+    auto sign = [](const uint32_t * bits, int i) { return (bits[i/32] >> (i%32)) & 1 ? -1.0 : 1.0; };
+    auto walsh = [](int i, int j) {
+        unsigned bits = i & j;
+        int parity = 0;
+        while (bits) {
+            parity ^= bits & 1;
+            bits >>= 1;
+        }
+        return parity ? -1.0 : 1.0;
+    };
+    const double inv_sqrt = 1.0/sqrt(128.0);
+    float x[512] = {}, decoded[512], query[512];
+    block_turbo2_0 encoded[4], split[4];
+    quantize_row_turbo2_0_ref(x, encoded, 512);
+    dequantize_row_turbo2_0(encoded, decoded, 512);
+    for (const auto & block : encoded) {
+        assert(block.d == 0);
+        for (uint8_t byte : block.qs) {
+            assert(byte == 0xaa);
+        }
+    }
+    for (float value : decoded) {
+        assert(value == 0.0f);
+    }
+
+    generate_data(0.0f, 512, x);
+    generate_data(1.0f, 512, query);
+    x[127] = 20.0f;
+    x[128] = -7.0f;
+    assert(ggml_quantize_chunk(GGML_TYPE_TURBO2_0, x, encoded, 0, 2, 256, nullptr) == sizeof(encoded));
+    ggml_quantize_chunk(GGML_TYPE_TURBO2_0, x, split, 0, 1, 256, nullptr);
+    ggml_quantize_chunk(GGML_TYPE_TURBO2_0, x, split, 256, 1, 256, nullptr);
+    assert(memcmp(encoded, split, sizeof(encoded)) == 0);
+    quantize_row_turbo2_0_ref(x, split, 128);
+    quantize_row_turbo2_0_ref(x + 128, split + 1, 384);
+    assert(memcmp(encoded, split, sizeof(encoded)) == 0);
+    assert(ggml_validate_row_data(GGML_TYPE_TURBO2_0, encoded, sizeof(encoded)));
+    assert(!ggml_validate_row_data(GGML_TYPE_TURBO2_0, encoded, sizeof(encoded) - 1));
+    dequantize_row_turbo2_0(encoded, decoded, 512);
+
+    double dot = 0.0, transformed_dot = 0.0;
+    for (int b = 0; b < 4; ++b) {
+        const double norm = ggml_fp16_to_fp32(encoded[b].d);
+        double original_sq = 0.0, decoded_sq = 0.0;
+        double input_sq = 0.0, centroid_sq = 0.0;
+        for (int j = 0; j < 128; ++j) {
+            input_sq += (double) x[b*128 + j]*x[b*128 + j];
+        }
+        for (int i = 0; i < 128; ++i) {
+            double expected = 0.0, rotated_query = 0.0, rotated_input = 0.0;
+            for (int j = 0; j < 128; ++j) {
+                const int index = (encoded[b].qs[j/4] >> (2*(j%4))) & 3;
+                expected += walsh(i, j)*sign(signs2, j)*centroids[index]*norm;
+                rotated_query += walsh(i, j)*sign(signs1, j)*query[b*128 + j];
+                rotated_input += walsh(i, j)*sign(signs1, j)*x[b*128 + j];
+            }
+            expected *= inv_sqrt*sign(signs1, i);
+            rotated_query *= inv_sqrt*sign(signs2, i);
+            assert(std::isfinite(decoded[b*128 + i]));
+            assert(fabs(decoded[b*128 + i] - expected) < 1e-5*(1.0 + fabs(expected)));
+            const int index = (encoded[b].qs[i/4] >> (2*(i%4))) & 3;
+            rotated_input *= inv_sqrt*sign(signs2, i)/sqrt(input_sq);
+            const int expected_index = rotated_input < -0.086728f ? 0 : rotated_input < 0.0 ? 1 : rotated_input < 0.086728f ? 2 : 3;
+            const double margin = fmin(fabs(rotated_input), fmin(fabs(rotated_input + 0.086728f), fabs(rotated_input - 0.086728f)));
+            if (margin > 1e-6) {
+                assert(index == expected_index);
+            }
+            centroid_sq += (double) centroids[index]*centroids[index];
+            transformed_dot += rotated_query*centroids[index]*norm;
+            dot += (double) query[b*128 + i]*decoded[b*128 + i];
+            original_sq += (double) x[b*128 + i]*x[b*128 + i];
+            decoded_sq += (double) decoded[b*128 + i]*decoded[b*128 + i];
+        }
+        assert(fabs(norm/sqrt(input_sq/centroid_sq) - 1.0) < 0.001);
+        assert(fabs(decoded_sq/original_sq - 1.0) < 0.002);
+    }
+    assert(fabs(dot - transformed_dot) < 1e-4*(1.0 + fabs(transformed_dot)));
+
+    block_turbo2_0 packed;
+    packed.d = ggml_fp32_to_fp16(1.0f);
+    memset(packed.qs, 0xe4, sizeof(packed.qs));
+    dequantize_row_turbo2_0(&packed, decoded, 128);
+    quantize_row_turbo2_0_ref(decoded, split, 128);
+    assert(memcmp(packed.qs, split[0].qs, sizeof(packed.qs)) == 0);
+    for (int i = 0; i < 128; ++i) {
+        double expected = 0.0;
+        for (int j = 0; j < 128; ++j) {
+            expected += walsh(i, j)*sign(signs2, j)*centroids[j%4];
+        }
+        expected *= inv_sqrt*sign(signs1, i);
+        assert(fabs(decoded[i] - expected) < 1e-6);
+    }
+    for (ggml_fp16_t invalid : {ggml_fp16_t(0x7e00), ggml_fp16_t(0x7c00)}) {
+        encoded[3].d = invalid;
+        assert(!ggml_validate_row_data(GGML_TYPE_TURBO2_0, encoded, sizeof(encoded)));
+    }
+}
+
 static void test_turboquant() {
     static_assert(GGML_TYPE_Q1_0 == 41 && GGML_TYPE_Q2_0 == 42, "existing tensor IDs changed");
     static_assert(GGML_TYPE_PQ2_0 == 142 && GGML_TYPE_PTQ1_0 == 143, "Bonsai tensor IDs changed");
@@ -394,6 +498,7 @@ int main(int argc, char * argv[]) {
     int num_failed = 0;
 
     test_turboquant();
+    test_turbo2();
 
     num_failed += test_vec_dot_f32(verbose);
     num_failed += test_vec_dot_q(verbose);

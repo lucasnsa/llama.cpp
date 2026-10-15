@@ -10899,13 +10899,13 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
-    for (ggml_type k : {GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0, GGML_TYPE_TBQP3_0}) {
+    for (ggml_type k : {GGML_TYPE_TURBO2_0, GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0, GGML_TYPE_TBQP3_0}) {
         for (ggml_type idx : {GGML_TYPE_I32, GGML_TYPE_I64}) {
             for (bool view : {false, true}) {
                 test_cases.emplace_back(new test_turboquant_reference(k, idx, view));
             }
         }
-        for (ggml_type v : {GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0}) {
+        for (ggml_type v : {GGML_TYPE_TURBO2_0, GGML_TYPE_TBQ3_0, GGML_TYPE_TBQ4_0}) {
             for (int64_t queries : {1, 3, 16}) {
                 test_cases.emplace_back(new test_turboquant_reference(k, v, queries, 2, 512));
             }
@@ -10916,6 +10916,9 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ4_0, GGML_TYPE_TBQ4_0, 1, 1, 256, true, 512, true));
     test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TBQ4_0, GGML_TYPE_TBQP3_0, 1, 1, 256, true, 256, true));
     test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_F16, GGML_TYPE_TBQ4_0, 1, 1, 256, true, 256, true));
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0, 1, 1, 256, true, 128, true));
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_TURBO2_0, GGML_TYPE_TBQP3_0, 1, 1, 256, true, 256, true));
+    test_cases.emplace_back(new test_turboquant_reference(GGML_TYPE_F16, GGML_TYPE_TURBO2_0, 1, 1, 256, true, 256, true));
 
     // mixed quant and Q1_0 test cases
     // ARC-LAB: q4_0-cache decode kernel (SYCL fattn-dec): Bonsai 27B shape (D 256, 4 KV heads x GQA 6), 1-4 query tokens

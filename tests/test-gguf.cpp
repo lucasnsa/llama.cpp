@@ -1424,6 +1424,7 @@ static void print_usage() {
 
 static bool test_bonsai_tensor_id() {
     static_assert(GGML_TYPE_Q2_0 == 42 && GGML_TYPE_PQ2_0 == 142 && GGML_TYPE_PTQ1_0 == 143, "Bonsai tensor IDs changed");
+    static_assert(GGML_TYPE_TBQ3_0 == 144 && GGML_TYPE_TBQ4_0 == 145 && GGML_TYPE_TBQP3_0 == 146 && GGML_TYPE_TURBO2_0 == 147 && GGML_TYPE_COUNT == 148, "TurboQuant tensor IDs changed");
     ggml_init_params params = {ggml_tensor_overhead(), nullptr, true};
     ggml_context * ctx = ggml_init(params);
     if (!ctx) {
