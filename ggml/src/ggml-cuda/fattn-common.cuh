@@ -7,6 +7,10 @@
 
 #include <cstdint>
 
+#ifndef GGML_CUDA_TBQ_SPLIT_KV
+#define GGML_CUDA_TBQ_SPLIT_KV 0
+#endif
+
 #define FATTN_KQ_STRIDE       256
 #define HALF_MAX_HALF         __float2half(65504.0f/2) // Use neg. of this instead of -INFINITY to initialize KQ max vals to avoid NaN upon subtraction.
 #define SOFTMAX_FTZ_THRESHOLD -20.0f                   // Softmax exp. of values smaller than this are flushed to zero to avoid NaNs.
@@ -1017,7 +1021,7 @@ static __global__ void flash_attn_stream_k_fixup_general(
     *dst = dst_val / rowsum;
 }
 
-template<int D> // D == head size
+template<int D, ggml_type type_V = GGML_TYPE_COUNT> // D == head size
 __launch_bounds__(D, 1)
 static __global__ void flash_attn_combine_results(
         const float  * VKQ_parts_ptr,
@@ -1072,13 +1076,32 @@ static __global__ void flash_attn_combine_results(
         VKQ_denominator += KQ_max_scale * meta[l].y;
     }
 
-    dst[tid] = VKQ_numerator / VKQ_denominator;
+    const float value = VKQ_numerator / VKQ_denominator;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if constexpr (type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TBQ3_0 || type_V == GGML_TYPE_TBQ4_0) {
+        static_assert(D == 256, "TurboQuant requires head size 256");
+        __shared__ float rotated[D];
+        if constexpr (type_V == GGML_TYPE_TURBO2_0) {
+            rotated[tid] = value*ggml_turbo2_sign(tid%QK_TURBO2, true);
+            ggml_cuda_turbo2_wht<D>(rotated);
+            dst[tid] = rotated[tid]*(0.08838834764831845f*ggml_turbo2_sign(tid%QK_TURBO2, false));
+        } else {
+            rotated[tid] = value;
+            ggml_cuda_tbq_wht<D>(rotated);
+            dst[tid] = rotated[tid]*ggml_tbq_sign(tid, false)/D;
+        }
+    } else
+#endif
+    {
+        dst[tid] = value;
+    }
 }
 
-template <int DV, int ncols1, int ncols2>
+template <int DV, int ncols1, int ncols2, ggml_type type_V = GGML_TYPE_COUNT>
 void launch_fattn(
     ggml_backend_cuda_context & ctx, ggml_tensor * dst, fattn_kernel_t fattn_kernel, const int nwarps, const size_t nbytes_shared,
-    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE
+    const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE,
+    fattn_kernel_t split_kernel = nullptr
 ) {
     constexpr int ncols = ncols1 * ncols2;
 
@@ -1283,6 +1306,10 @@ void launch_fattn(
             }
         }
 
+        if constexpr (ggml_type_is_turboquant(type_V) && GGML_CUDA_TBQ_SPLIT_KV > 0) {
+            parallel_blocks = std::min(GGML_CUDA_TBQ_SPLIT_KV, ntiles_KV);
+        }
+
         blocks_num.x = ntiles_x;
         blocks_num.y = parallel_blocks;
         blocks_num.z = ntiles_z_gqa*K->ne[2]*Q->ne[3];
@@ -1316,6 +1343,10 @@ void launch_fattn(
 
     GGML_ASSERT(block_dim.x % warp_size == 0);
 
+        if (split_kernel && parallel_blocks > 1) {
+            GGML_ASSERT(!stream_k);
+            fattn_kernel = split_kernel;
+        }
         ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num, block_dim, nbytes_shared, main_stream);
         ggml_cuda_kernel_launch(fattn_kernel, launch_params,
         (const char *) Q->data,
@@ -1376,7 +1407,13 @@ void launch_fattn(
         const size_t nbytes_shared_combine = parallel_blocks*sizeof(float2);
 
         const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num_combine, block_dim_combine, nbytes_shared_combine, main_stream);
-        ggml_cuda_kernel_launch(flash_attn_combine_results<DV>, launch_params,
+        auto combine_kernel = flash_attn_combine_results<DV>;
+        if constexpr (ggml_type_is_turboquant(type_V)) {
+            if (split_kernel) {
+                combine_kernel = flash_attn_combine_results<DV, type_V>;
+            }
+        }
+        ggml_cuda_kernel_launch(combine_kernel, launch_params,
             dst_tmp.ptr, dst_tmp_meta.ptr, (float *) KQV->data, parallel_blocks);
     }
     CUDA_CHECK(cudaGetLastError());

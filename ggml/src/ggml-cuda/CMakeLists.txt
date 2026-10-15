@@ -158,6 +158,12 @@ if (CUDAToolkit_FOUND)
         message(FATAL_ERROR "GGML_CUDA_TBQ_PREFILL_ROWS must be 2, 4, or 8")
     endif()
     target_compile_definitions(ggml-cuda PRIVATE GGML_CUDA_TBQ_PREFILL_ROWS=${GGML_CUDA_TBQ_PREFILL_ROWS})
+    if (NOT GGML_CUDA_TBQ_SPLIT_KV MATCHES "^(0|1|2|4|8)$")
+        message(FATAL_ERROR "GGML_CUDA_TBQ_SPLIT_KV must be 0, 1, 2, 4, or 8")
+    endif()
+    target_compile_definitions(ggml-cuda PRIVATE
+        GGML_CUDA_TBQ_DEFER_V=$<BOOL:${GGML_CUDA_TBQ_DEFER_V}>
+        GGML_CUDA_TBQ_SPLIT_KV=${GGML_CUDA_TBQ_SPLIT_KV})
 
     if (GGML_CUDA_NO_PEER_COPY)
         add_compile_definitions(GGML_CUDA_NO_PEER_COPY)

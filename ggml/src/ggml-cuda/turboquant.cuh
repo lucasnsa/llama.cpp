@@ -11,17 +11,21 @@ static __device__ void quantize_f32_turbo2_0_block(const float * x, block_turbo2
     y->d = __float2half(norm);
 }
 
-// All 128 threads transform two independent 128-element groups.
+// Extra threads only take part in barriers in the split-KV combiner.
+template <int nthreads = 128>
 static __device__ __forceinline__ void ggml_cuda_turbo2_wht(float * buf) {
+    static_assert(nthreads == 128 || nthreads == 256, "unsupported WHT block size");
     const int tid = threadIdx.y*WARP_SIZE + threadIdx.x;
     __syncthreads();
     for (int len = 1; len < QK_TURBO2; len *= 2) {
-        const int lane = tid % (QK_TURBO2/2);
-        const int i = (tid/(QK_TURBO2/2))*QK_TURBO2 + (lane/len)*(2*len) + lane%len;
-        const float u = buf[i];
-        const float v = buf[i + len];
-        buf[i] = u + v;
-        buf[i + len] = u - v;
+        if (nthreads == 128 || tid < 128) {
+            const int lane = tid % (QK_TURBO2/2);
+            const int i = (tid/(QK_TURBO2/2))*QK_TURBO2 + (lane/len)*(2*len) + lane%len;
+            const float u = buf[i];
+            const float v = buf[i + len];
+            buf[i] = u + v;
+            buf[i + len] = u - v;
+        }
         __syncthreads();
     }
 }
@@ -45,16 +49,20 @@ static __device__ void quantize_f32_tbqp3_0_block(const float * x, block_tbqp3_0
     y->d_qjl = __float2half(norm_qjl);
 }
 
-// All 128 threads use the same shared buffer.
+// The first 128 threads update the shared buffer.
+template <int nthreads = 128>
 static __device__ __forceinline__ void ggml_cuda_tbq_wht(float * buf) {
+    static_assert(nthreads == 128 || nthreads == 256, "unsupported WHT block size");
     const int tid = threadIdx.y*WARP_SIZE + threadIdx.x;
     __syncthreads();
     for (int len = 1; len < QK_TBQ; len *= 2) {
-        const int i = (tid/len)*(2*len) + tid%len;
-        const float u = buf[i];
-        const float v = buf[i + len];
-        buf[i] = u + v;
-        buf[i + len] = u - v;
+        if (nthreads == 128 || tid < 128) {
+            const int i = (tid/len)*(2*len) + tid%len;
+            const float u = buf[i];
+            const float v = buf[i + len];
+            buf[i] = u + v;
+            buf[i + len] = u - v;
+        }
         __syncthreads();
     }
 }
