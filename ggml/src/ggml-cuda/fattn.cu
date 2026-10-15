@@ -283,6 +283,16 @@ typedef void (* fattn_vec_case_t)(ggml_backend_cuda_context & ctx, ggml_tensor *
 
 // Vector kernel for the given head size and K/V types, nullptr if its template instance was not compiled:
 static fattn_vec_case_t ggml_cuda_get_fattn_vec_case(const int64_t head_size, const ggml_type type_K, const ggml_type type_V) {
+
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    FATTN_VEC_CASE(256, TBQ3_0, TBQ3_0)
+    FATTN_VEC_CASE(256, TBQ3_0, TBQ4_0)
+    FATTN_VEC_CASE(256, TBQ4_0, TBQ3_0)
+    FATTN_VEC_CASE(256, TBQ4_0, TBQ4_0)
+    FATTN_VEC_CASE(256, TBQP3_0, TBQ3_0)
+    FATTN_VEC_CASE(256, TBQP3_0, TBQ4_0)
+#endif
+
     FATTN_VEC_CASES_ALL_D(F16,  F16)
     FATTN_VEC_CASES_ALL_D(Q4_0, F16)
     FATTN_VEC_CASES_ALL_D(Q4_1, F16)
@@ -469,6 +479,17 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             break;
         default:
             return BEST_FATTN_KERNEL_NONE;
+    }
+
+    if (ggml_type_is_turboquant(K->type) || ggml_type_is_turboquant(V->type)) {
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+        if (Q->type == GGML_TYPE_F32 && Q->ne[0] == 256 && V->ne[0] == 256 &&
+            K->ne[1] % FATTN_KQ_STRIDE == 0 && (!mask || mask->ne[2] == 1) &&
+            ggml_cuda_get_fattn_vec_case(Q->ne[0], K->type, V->type) != nullptr) {
+            return BEST_FATTN_KERNEL_VEC;
+        }
+#endif
+        return BEST_FATTN_KERNEL_NONE;
     }
 
     if (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type)) {

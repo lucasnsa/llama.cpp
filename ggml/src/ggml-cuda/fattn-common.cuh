@@ -3,6 +3,7 @@
 #include "common.cuh"
 #include "convert.cuh"
 #include "vecdotq.cuh"
+#include "turboquant.cuh"
 
 #include <cstdint>
 
@@ -617,6 +618,67 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
     }
 }
 
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+template <ggml_type type_K, int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tbq(
+        const char * K_c, const void * Q_v, const int * Q_q8, const void * Q_ds_v) {
+    static_assert(D == QK_TBQ, "TurboQuant requires head size 256");
+    const uint8_t * qs;
+    float norm;
+    if constexpr (type_K == GGML_TYPE_TBQ3_0) {
+        const auto * k = (const block_tbq3_0 *) K_c;
+        qs = k->qs;
+        norm = __half2float(k->d);
+    } else if constexpr (type_K == GGML_TYPE_TBQ4_0) {
+        const auto * k = (const block_tbq4_0 *) K_c;
+        qs = k->qs;
+        norm = __half2float(k->d);
+    } else {
+        const auto * k = (const block_tbqp3_0 *) K_c;
+        qs = k->qs;
+        norm = __half2float(k->d);
+    }
+    constexpr int bits = type_K == GGML_TYPE_TBQ3_0 ? 3 : type_K == GGML_TYPE_TBQ4_0 ? 4 : 2;
+    float sum = 0.0f;
+    for (int i0 = 0; i0 < D/2; i0 += nthreads) {
+        const int i = 2*(i0 + threadIdx.x%nthreads);
+        const float2 q = ((const float2 *) Q_v)[i0/nthreads];
+        sum += norm*(q.x*ggml_tbq_centroid(bits, ggml_tbq_unpack(qs, i, bits)) +
+                     q.y*ggml_tbq_centroid(bits, ggml_tbq_unpack(qs, i + 1, bits)));
+        if constexpr (type_K == GGML_TYPE_TBQP3_0) {
+            const auto * k = (const block_tbqp3_0 *) K_c;
+            const float2 qjl = ((const float2 *) Q_ds_v)[i0/nthreads];
+            const float s0 = ((k->qjl[i/8] >> (i%8)) & 1) ? 1.0f : -1.0f;
+            const float s1 = ((k->qjl[(i + 1)/8] >> ((i + 1)%8)) & 1) ? 1.0f : -1.0f;
+            sum += __half2float(k->d_qjl)*(qjl.x*s0 + qjl.y*s1);
+        }
+    }
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    return sum;
+}
+
+template <ggml_type type_V, typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_tbq(const void * vx, void * dst, const int64_t i0) {
+    static_assert(std::is_same_v<T, float>, "TurboQuant accumulates in float");
+    const uint8_t * qs;
+    float norm;
+    if constexpr (type_V == GGML_TYPE_TBQ3_0) {
+        const auto * v = (const block_tbq3_0 *) vx;
+        qs = v->qs;
+        norm = __half2float(v->d);
+    } else {
+        const auto * v = (const block_tbq4_0 *) vx;
+        qs = v->qs;
+        norm = __half2float(v->d);
+    }
+    constexpr int bits = type_V == GGML_TYPE_TBQ3_0 ? 3 : 4;
+    for (int l = 0; l < ne; ++l) {
+        ((float *) dst)[l] = norm*ggml_tbq_centroid(bits, ggml_tbq_unpack(qs, i0 + l, bits));
+    }
+}
+#endif
+
 template <ggml_type type_K, int D, int nthreads>
 constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     if constexpr (type_K == GGML_TYPE_F16) {
@@ -633,6 +695,10 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
         return vec_dot_fattn_vec_KQ_q8_0<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    } else if constexpr (type_K == GGML_TYPE_TBQ3_0 || type_K == GGML_TYPE_TBQ4_0 || type_K == GGML_TYPE_TBQP3_0) {
+        return vec_dot_fattn_vec_KQ_tbq<type_K, D, nthreads>;
+#endif
     } else {
         static_assert(type_K == -1, "bad type");
         return nullptr;
@@ -655,6 +721,10 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
         return dequantize_V_q8_0<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    } else if constexpr (type_V == GGML_TYPE_TBQ3_0 || type_V == GGML_TYPE_TBQ4_0) {
+        return dequantize_V_tbq<type_V, T, ne>;
+#endif
     } else {
         static_assert(type_V == -1, "bad type");
         return nullptr;
