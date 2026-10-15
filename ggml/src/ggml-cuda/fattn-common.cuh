@@ -1241,12 +1241,15 @@ void launch_fattn(
     }
 
     const dim3 block_dim(warp_size, nwarps, 1);
+    const int ntiles_KV = (K->ne[1] + nbatch_fa - 1) / nbatch_fa;
+    fattn_kernel_t occupancy_kernel = fattn_kernel;
+    if (ntiles_KV > 1 && !(ggml_type_is_turboquant(type_V) && GGML_CUDA_TBQ_SPLIT_KV == 1)) {
+        occupancy_kernel = prepared_kernel ? prepared_kernel : split_kernel ? split_kernel : fattn_kernel;
+    }
     int max_blocks_per_sm = 1; // Max. number of active blocks limited by occupancy.
-    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm, fattn_kernel, block_dim.x * block_dim.y * block_dim.z, nbytes_shared));
+    CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&max_blocks_per_sm, occupancy_kernel, block_dim.x * block_dim.y * block_dim.z, nbytes_shared));
     GGML_ASSERT(max_blocks_per_sm > 0);
     int parallel_blocks = max_blocks_per_sm;
-
-    const int ntiles_KV = (K->ne[1] + nbatch_fa - 1) / nbatch_fa; // Max. number of parallel blocks limited by KV cache length.
 
     dim3 blocks_num;
     if (stream_k) {
