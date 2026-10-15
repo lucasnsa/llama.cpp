@@ -8005,17 +8005,26 @@ struct test_turboquant_reference : public test_case {
                 ggml_backend_tensor_set(inputs[i], values.data(), 0, values.size()*sizeof(float));
             }
         }
-        if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS || ggml_backend_graph_compute(cpu, ref_graph) != GGML_STATUS_SUCCESS) {
-            return report(true, false, "attention computation failed");
+        if (ggml_backend_graph_compute(cpu, ref_graph) != GGML_STATUS_SUCCESS) {
+            return report(true, false, "reference attention computation failed");
         }
-        const auto actual = tensor_to_float(out);
         const auto expected = tensor_to_float(ref_out);
-        bool finite = true;
-        for (size_t i = 0; i < actual.size(); ++i) {
-            finite = finite && std::isfinite(actual[i]) && std::isfinite(expected[i]);
+        const int repeats = queries >= 8 ? 2 : 1;
+        for (int run = 0; run < repeats; ++run) {
+            if (ggml_backend_graph_compute(backend, gf) != GGML_STATUS_SUCCESS) {
+                return report(true, false, "attention computation failed");
+            }
+            const auto actual = tensor_to_float(out);
+            bool finite = true;
+            for (size_t i = 0; i < actual.size(); ++i) {
+                finite = finite && std::isfinite(actual[i]) && std::isfinite(expected[i]);
+            }
+            const bool passed = finite && nmse(actual.data(), expected.data(), actual.size()) <= 5e-4;
+            if (!passed) {
+                return report(true, false, "attention differs from decoded F32 reference");
+            }
         }
-        const bool passed = finite && nmse(actual.data(), expected.data(), actual.size()) <= 5e-4;
-        return report(true, passed, passed ? "" : "attention differs from decoded F32 reference");
+        return report(true, true, "");
     }
 };
 

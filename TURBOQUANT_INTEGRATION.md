@@ -320,6 +320,14 @@ Forced partitions are for diagnosis and regression coverage. Restore 0 for perfo
 
 Larger tiles increase register use and shared memory; 8 rows can lose occupancy or spill, particularly with TBQP3's extra query projection. Shared Q preparation adds a kernel launch, a temporary allocation, and query-buffer traffic; its benefit depends on the actual partition count. Deferred V helps only when multiple partitions are used. None of these effects can be ranked reliably from source inspection alone.
 
+### VMM pool lifetime correction
+
+The user's first prefill run of the new implementation aborted at `ggml-cuda.cu` with `GGML_ASSERT(ptr == (void *) ((char *)(pool_addr) + pool_used))`, before producing throughput results. Source review found an incorrect RAII declaration order in `launch_fattn`: `rotated_q` was allocated after `dst_tmp_meta`, but its earlier declaration caused the metadata destructor to run first. The VMM pool requires strict reverse allocation order when releasing buffers.
+
+The fix declares the buffers in allocation order: `KV_max`, `dst_tmp`, `dst_tmp_meta`, then `rotated_q`. Destruction therefore releases the rotated query buffer first. The VMM pool, attention arithmetic, and cache format are unchanged. Existing prefill regression cases with at least eight queries now compute the CUDA graph twice and compare each result to the same-byte F32 reference, covering repeated pool use. No new test file is added. Use `split2` with query preparation enabled to exercise this allocation path deterministically; keep VMM enabled for this check.
+
+After transferring this correction, rebuild the user's existing directory with `cmake --build build-prefill --parallel 2 --target llama-bench test-backend-ops`, then run `build-prefill/bin/test-backend-ops test -b CUDA0 -o FLASH_ATTN_EXT -p 'type_k=tbq3_0,type_v=tbq3_0,queries=(8|17),'` before repeating the original pp4096/tg256 command. The full regression and forced-partition commands below remain applicable. Compilation, runtime correction, numerical checks, and performance after this fix are **PENDING USER VALIDATION**; no successful prefill result has been reported for these optimizations yet.
+
 ### Manual builds and comparisons
 
 Run the following only on the Debian CUDA server, after transferring the local branch. No dependencies or models are downloaded. These commands configure CUDA 12.8 for sm_86, keep FA enabled, and limit build parallelism to two. Build directories are separate so variants can be compared without changing binaries between runs.

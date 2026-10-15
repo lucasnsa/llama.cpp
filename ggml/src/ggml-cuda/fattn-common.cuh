@@ -1136,10 +1136,11 @@ void launch_fattn(
     const ggml_cuda_flash_attn_ext_f16_extra_data f16_extra =
         ggml_cuda_flash_attn_ext_get_f16_extra_data(KQV, need_f16_K, need_f16_V);
 
+    // VMM frees in LIFO order; keep declarations in allocation order.
     ggml_cuda_pool_alloc<int>    KV_max(pool);
     ggml_cuda_pool_alloc<float>  dst_tmp(pool);
-    ggml_cuda_pool_alloc<float>  rotated_q(pool);
     ggml_cuda_pool_alloc<float2> dst_tmp_meta(pool);
+    ggml_cuda_pool_alloc<float>  rotated_q(pool);
 
     const char * K_data = (const char *) K->data;
     size_t nb11 = K->nb[1];
