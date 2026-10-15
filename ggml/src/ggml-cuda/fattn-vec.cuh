@@ -1,6 +1,10 @@
 #include "common.cuh"
 #include "fattn-common.cuh"
 
+#ifndef GGML_CUDA_TBQ_PREFILL_ROWS
+#define GGML_CUDA_TBQ_PREFILL_ROWS 2
+#endif
+
 static int ggml_cuda_fattn_vec_get_nthreads_host(const int cc) {
     return 128;
     GGML_UNUSED(cc);
@@ -638,6 +642,17 @@ void ggml_cuda_flash_attn_ext_vec_case(ggml_backend_cuda_context & ctx, ggml_ten
             ggml_cuda_flash_attn_ext_vec_case_impl<D, cols_per_block, type_K, type_V, use_logit_softcap>(ctx, dst);
         }
         return;
+    }
+
+    if constexpr (ggml_type_is_turboquant(type_K) && GGML_CUDA_TBQ_PREFILL_ROWS > 2) {
+        if (Q->ne[1] >= GGML_CUDA_TBQ_PREFILL_ROWS && !ggml_cuda_batch_invariant()) {
+            if (logit_softcap == 0.0f) {
+                ggml_cuda_flash_attn_ext_vec_case_impl<D, GGML_CUDA_TBQ_PREFILL_ROWS, type_K, type_V, false>(ctx, dst);
+            } else {
+                ggml_cuda_flash_attn_ext_vec_case_impl<D, GGML_CUDA_TBQ_PREFILL_ROWS, type_K, type_V, true>(ctx, dst);
+            }
+            return;
+        }
     }
 
     constexpr int cols_per_block = 2;
