@@ -67,4 +67,60 @@ static __device__ __forceinline__ void ggml_cuda_tbq_wht(float * buf) {
     }
 }
 
+template <ggml_type type_K>
+__launch_bounds__(128, 1)
+static __global__ void k_turboquant_prepare_q(
+        const char * src, float * dst, const int ne1, const int ne2,
+        const int64_t nb1, const int64_t nb2, const int64_t nb3, const float scale) {
+    ggml_cuda_pdl_lc();
+    constexpr int D = 256;
+    constexpr int planes = type_K == GGML_TYPE_TBQP3_0 ? 2 : 1;
+    const int row = blockIdx.x;
+    const int col = row%ne1;
+    const int head = (row/ne1)%ne2;
+    const int sequence = row/(ne1*ne2);
+    const float * q = (const float *) (src + col*nb1 + head*nb2 + sequence*nb3);
+    float * out = dst + int64_t(row)*D*planes;
+    __shared__ float buf[D];
+    ggml_cuda_pdl_sync();
+    if constexpr (type_K == GGML_TYPE_TURBO2_0) {
+        for (int i = threadIdx.x; i < D; i += 128) {
+            buf[i] = q[i]*ggml_turbo2_sign(i%QK_TURBO2, false);
+        }
+        ggml_cuda_turbo2_wht(buf);
+        for (int i = threadIdx.x; i < D; i += 128) {
+            out[i] = buf[i]*(0.08838834764831845f*ggml_turbo2_sign(i%QK_TURBO2, true))*scale;
+        }
+    } else {
+        for (int i = threadIdx.x; i < D; i += 128) {
+            buf[i] = q[i]*ggml_tbq_sign(i, false);
+        }
+        ggml_cuda_tbq_wht(buf);
+        for (int i = threadIdx.x; i < D; i += 128) {
+            out[i] = buf[i]*scale/D;
+        }
+        if constexpr (type_K == GGML_TYPE_TBQP3_0) {
+            for (int i = threadIdx.x; i < D; i += 128) {
+                buf[i] *= ggml_tbq_sign(i, true);
+            }
+            ggml_cuda_tbq_wht(buf);
+            const float sf = scale*1.2533f/(D*D);
+            for (int i = threadIdx.x; i < D; i += 128) {
+                out[D + i] = buf[i]*sf;
+            }
+        }
+    }
+}
+
+template <ggml_type type_K>
+static void ggml_cuda_turboquant_prepare_q(const ggml_tensor * q, float * dst, float scale, cudaStream_t stream) {
+    GGML_ASSERT(q->ne[0] == 256);
+    const dim3 blocks(ggml_nrows(q));
+    const ggml_cuda_kernel_launch_params params = ggml_cuda_kernel_launch_params(blocks, dim3(128), 0, stream);
+    ggml_cuda_kernel_launch(k_turboquant_prepare_q<type_K>, params,
+        (const char *) q->data, dst, int(q->ne[1]), int(q->ne[2]),
+        int64_t(q->nb[1]), int64_t(q->nb[2]), int64_t(q->nb[3]), scale);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 #endif

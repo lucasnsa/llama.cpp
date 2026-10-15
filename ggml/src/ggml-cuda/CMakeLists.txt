@@ -163,6 +163,7 @@ if (CUDAToolkit_FOUND)
     endif()
     target_compile_definitions(ggml-cuda PRIVATE
         GGML_CUDA_TBQ_DEFER_V=$<BOOL:${GGML_CUDA_TBQ_DEFER_V}>
+        GGML_CUDA_TBQ_PRE_ROTATE_Q=$<BOOL:${GGML_CUDA_TBQ_PRE_ROTATE_Q}>
         GGML_CUDA_TBQ_SPLIT_KV=${GGML_CUDA_TBQ_SPLIT_KV})
 
     if (GGML_CUDA_NO_PEER_COPY)

@@ -1097,11 +1097,11 @@ static __global__ void flash_attn_combine_results(
     }
 }
 
-template <int DV, int ncols1, int ncols2, ggml_type type_V = GGML_TYPE_COUNT>
+template <int DV, int ncols1, int ncols2, ggml_type type_V = GGML_TYPE_COUNT, ggml_type type_K = GGML_TYPE_COUNT>
 void launch_fattn(
     ggml_backend_cuda_context & ctx, ggml_tensor * dst, fattn_kernel_t fattn_kernel, const int nwarps, const size_t nbytes_shared,
     const int nbatch_fa, const bool need_f16_K, const bool need_f16_V, const bool stream_k, const int warp_size = WARP_SIZE,
-    fattn_kernel_t split_kernel = nullptr
+    fattn_kernel_t split_kernel = nullptr, fattn_kernel_t prepared_kernel = nullptr
 ) {
     constexpr int ncols = ncols1 * ncols2;
 
@@ -1136,6 +1136,7 @@ void launch_fattn(
 
     ggml_cuda_pool_alloc<int>    KV_max(pool);
     ggml_cuda_pool_alloc<float>  dst_tmp(pool);
+    ggml_cuda_pool_alloc<float>  rotated_q(pool);
     ggml_cuda_pool_alloc<float2> dst_tmp_meta(pool);
 
     const char * K_data = (const char *) K->data;
@@ -1341,15 +1342,35 @@ void launch_fattn(
     // TODO other tensor dimensions after removal of WMMA kernel:
     const uint3 ne01 = init_fastdiv_values(Q->ne[1]);
 
-    GGML_ASSERT(block_dim.x % warp_size == 0);
-
-        if (split_kernel && parallel_blocks > 1) {
+    const char * Q_data = (const char *) Q->data;
+    int64_t nb01 = Q->nb[1];
+    int64_t nb02 = Q->nb[2];
+    int64_t nb03 = Q->nb[3];
+    if (split_kernel && parallel_blocks > 1) {
+        GGML_ASSERT(!stream_k);
+        fattn_kernel = split_kernel;
+    }
+#if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    if constexpr (ggml_type_is_turboquant(type_K)) {
+        if (prepared_kernel && parallel_blocks > 1) {
             GGML_ASSERT(!stream_k);
-            fattn_kernel = split_kernel;
+            constexpr int planes = type_K == GGML_TYPE_TBQP3_0 ? 2 : 1;
+            nb01 = DV*planes*sizeof(float);
+            nb02 = nb01*Q->ne[1];
+            nb03 = nb02*Q->ne[2];
+            GGML_ASSERT(nb03 <= INT32_MAX);
+            rotated_q.alloc(size_t(DV)*planes*ggml_nrows(Q));
+            ggml_cuda_turboquant_prepare_q<type_K>(Q, rotated_q.ptr, scale, main_stream);
+            Q_data = (const char *) rotated_q.ptr;
+            fattn_kernel = prepared_kernel;
         }
-        ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num, block_dim, nbytes_shared, main_stream);
-        ggml_cuda_kernel_launch(fattn_kernel, launch_params,
-        (const char *) Q->data,
+    }
+#endif
+
+    GGML_ASSERT(block_dim.x % warp_size == 0);
+    const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num, block_dim, nbytes_shared, main_stream);
+    ggml_cuda_kernel_launch(fattn_kernel, launch_params,
+        Q_data,
         K_data,
         V_data,
         mask ? ((const char *) mask->data) : nullptr,
@@ -1357,7 +1378,7 @@ void launch_fattn(
         KV_max.ptr,
         !stream_k && parallel_blocks > 1 ? dst_tmp.ptr : (float *) KQV->data, dst_tmp_meta.ptr,
         scale, max_bias, m0, m1, n_head_log2, logit_softcap,
-        Q->ne[0], ne01,     Q->ne[2], Q->ne[3], Q->nb[1], Q->nb[2], Q->nb[3],
+        Q->ne[0], ne01,     Q->ne[2], Q->ne[3], nb01, nb02, nb03,
         K->ne[0], K->ne[1], K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,

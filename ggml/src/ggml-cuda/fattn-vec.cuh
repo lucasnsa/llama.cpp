@@ -7,6 +7,9 @@
 #ifndef GGML_CUDA_TBQ_DEFER_V
 #define GGML_CUDA_TBQ_DEFER_V 0
 #endif
+#ifndef GGML_CUDA_TBQ_PRE_ROTATE_Q
+#define GGML_CUDA_TBQ_PRE_ROTATE_Q 0
+#endif
 
 static int ggml_cuda_fattn_vec_get_nthreads_host(const int cc) {
     return 128;
@@ -23,7 +26,7 @@ static constexpr __device__ int ggml_cuda_fattn_vec_get_nthreads_device() {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wpass-failed"
 #endif // __clang__
-template<int D, int ncols, ggml_type type_K, ggml_type type_V, bool use_logit_softcap, bool defer_v_rotation = false> // D == head size
+template<int D, int ncols, ggml_type type_K, ggml_type type_V, bool use_logit_softcap, bool defer_v_rotation = false, bool prepared_q = false> // D == head size
 __launch_bounds__(ggml_cuda_fattn_vec_get_nthreads_device(), 1)
 static __global__ void flash_attn_ext_vec(
         const char * Q_ptr,
@@ -158,7 +161,19 @@ static __global__ void flash_attn_ext_vec(
     float2 Q_ds[ncols][Q_ds_size];
 
     ggml_cuda_pdl_sync();
-    if constexpr (Q_q8_1) {
+    if constexpr (prepared_q) {
+        for (int j = 0; j < ncols; ++j) {
+            const bool valid = ic0 + j < int(ne01.z);
+            const float * q = (const float *) (Q + j*nb01);
+            for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ) {
+                const int i = 2*(i0 + threadIdx.x%nthreads_KQ);
+                Q_reg[j][i0/nthreads_KQ] = valid ? make_float2(q[i], q[i + 1]) : make_float2(0.0f, 0.0f);
+                if constexpr (type_K == GGML_TYPE_TBQP3_0) {
+                    Q_ds[j][i0/nthreads_KQ] = valid ? make_float2(q[D + i], q[D + i + 1]) : make_float2(0.0f, 0.0f);
+                }
+            }
+        }
+    } else if constexpr (Q_q8_1) {
 #pragma unroll
         for (int j0 = 0; j0 < ncols; j0 += nwarps) {
             const int j = j0 + threadIdx.y;
@@ -625,10 +640,14 @@ void ggml_cuda_flash_attn_ext_vec_case_impl(ggml_backend_cuda_context & ctx, ggm
     const bool need_f16_V = type_V == GGML_TYPE_F16;
     constexpr size_t nbytes_shared = 0;
     fattn_kernel_t split_kernel = nullptr;
+    fattn_kernel_t prepared_kernel = nullptr;
     if constexpr (GGML_CUDA_TBQ_DEFER_V && ggml_type_is_turboquant(type_V) && cols_per_block > 2) {
         split_kernel = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap, true>;
     }
-    launch_fattn<D, cols_per_block, 1, type_V>(ctx, dst, fattn_kernel, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false, WARP_SIZE, split_kernel);
+    if constexpr (GGML_CUDA_TBQ_PRE_ROTATE_Q && ggml_type_is_turboquant(type_K) && cols_per_block > 2) {
+        prepared_kernel = flash_attn_ext_vec<D, cols_per_block, type_K, type_V, use_logit_softcap, bool(GGML_CUDA_TBQ_DEFER_V), true>;
+    }
+    launch_fattn<D, cols_per_block, 1, type_V, type_K>(ctx, dst, fattn_kernel, nwarps, nbytes_shared, D, need_f16_K, need_f16_V, false, WARP_SIZE, split_kernel, prepared_kernel);
 }
 
 template <int D, ggml_type type_K, ggml_type type_V>

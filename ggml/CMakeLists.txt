@@ -212,6 +212,7 @@ option(GGML_CUDA_FA_ALL_QUANTS              "ggml: compile all quants for FlashA
 set   (GGML_CUDA_TBQ_PREFILL_ROWS 8 CACHE STRING "ggml: TurboQuant vector prefill query rows per block (2, 4, or 8)")
 set_property(CACHE GGML_CUDA_TBQ_PREFILL_ROWS PROPERTY STRINGS 2 4 8)
 option(GGML_CUDA_TBQ_DEFER_V "ggml: inverse TurboQuant V rotation after split-prefill combination" ON)
+option(GGML_CUDA_TBQ_PRE_ROTATE_Q "ggml: share TurboQuant query rotations across split-prefill partitions" ON)
 set   (GGML_CUDA_TBQ_SPLIT_KV 0 CACHE STRING "ggml: force TurboQuant KV partitions for validation (0=automatic, 1, 2, 4, or 8)")
 set_property(CACHE GGML_CUDA_TBQ_SPLIT_KV PROPERTY STRINGS 0 1 2 4 8)
 set   (GGML_CUDA_FA_QUANTS "q4_0-q4_0;q8_0-q8_0;f16-f16;bf16-bf16;tbq3_0-tbq3_0;tbq3_0-tbq4_0;tbq4_0-tbq3_0;tbq4_0-tbq4_0;tbqp3_0-tbq3_0;tbqp3_0-tbq4_0;turbo2_0-turbo2_0;turbo2_0-tbq3_0;turbo2_0-tbq4_0;tbq3_0-turbo2_0;tbq4_0-turbo2_0;tbqp3_0-turbo2_0" CACHE STRING
