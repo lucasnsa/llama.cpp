@@ -315,12 +315,16 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_TBQ3_0,
     GGML_TYPE_TBQ4_0,
     GGML_TYPE_TBQP3_0,
+    GGML_TYPE_TURBO2_0,
 };
 
 static ggml_type kv_cache_type_from_str(const std::string & s, bool is_v = false) {
+    if (s == "turbo2" || s == "turbo2_0") {
+        return GGML_TYPE_TURBO2_0;
+    }
     if (s == "tbqp3" || s == "tbqp3_0") {
         if (is_v) {
-            throw std::invalid_argument("tbqp3 is supported for K cache only; use tbq3 or tbq4 for V");
+            throw std::invalid_argument("tbqp3 is supported for K cache only; use turbo2, tbq3 or tbq4 for V");
         }
         return GGML_TYPE_TBQP3_0;
     }
@@ -349,7 +353,7 @@ static std::string get_all_kv_cache_types(bool is_v = false) {
         }
         msg << ggml_type_name(type);
         if (ggml_type_is_turboquant(type)) {
-            msg << " (" << (type == GGML_TYPE_TBQ3_0 ? "tbq3" : type == GGML_TYPE_TBQ4_0 ? "tbq4" : "tbqp3") << ")";
+            msg << " (" << (type == GGML_TYPE_TURBO2_0 ? "turbo2" : type == GGML_TYPE_TBQ3_0 ? "tbq3" : type == GGML_TYPE_TBQ4_0 ? "tbq4" : "tbqp3") << ")";
         }
     }
     return msg.str();
@@ -988,7 +992,7 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
     auto validate_cache_pair = [](ggml_type k, ggml_type v) {
         if ((ggml_type_is_turboquant(k) || ggml_type_is_turboquant(v)) &&
             (!ggml_type_is_turboquant(k) || !ggml_type_is_turboquant(v) || v == GGML_TYPE_TBQP3_0)) {
-            throw std::invalid_argument("TurboQuant requires K=tbq3/tbq4/tbqp3 and V=tbq3/tbq4");
+            throw std::invalid_argument("TurboQuant requires K=turbo2/tbq3/tbq4/tbqp3 and V=turbo2/tbq3/tbq4");
         }
     };
     validate_cache_pair(params.cache_type_k, params.cache_type_v);

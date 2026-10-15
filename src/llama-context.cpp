@@ -4127,7 +4127,7 @@ llama_context * llama_init_from_model(
 
     if (ggml_type_is_turboquant(params.type_k) || ggml_type_is_turboquant(params.type_v)) {
         if (!ggml_type_is_turboquant(params.type_k) || !ggml_type_is_turboquant(params.type_v) || params.type_v == GGML_TYPE_TBQP3_0) {
-            LLAMA_LOG_ERROR("%s: TurboQuant requires K=tbq3/tbq4/tbqp3 and V=tbq3/tbq4\n", __func__);
+            LLAMA_LOG_ERROR("%s: TurboQuant requires K=turbo2/tbq3/tbq4/tbqp3 and V=turbo2/tbq3/tbq4\n", __func__);
             return nullptr;
         }
         if (!params.offload_kqv) {

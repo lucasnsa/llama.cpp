@@ -476,6 +476,9 @@ static void print_usage(int /* argc */, char ** argv) {
 }
 
 static ggml_type ggml_type_from_name(const std::string & s) {
+    if (s == "turbo2" || s == "turbo2_0") {
+        return GGML_TYPE_TURBO2_0;
+    }
     if (s == "tbq3" || s == "tbq3_0") {
         return GGML_TYPE_TBQ3_0;
     }
