@@ -95,7 +95,8 @@ static __global__ void flash_attn_ext_vec(
 
     constexpr vec_dot_KQ_t vec_dot_KQ = get_vec_dot_KQ<type_K, D, nthreads_KQ>();
     constexpr bool Q_q8_1 = type_K != GGML_TYPE_F16 && type_K != GGML_TYPE_BF16 &&
-                            type_K != GGML_TYPE_TBQ3_0 && type_K != GGML_TYPE_TBQ4_0 && type_K != GGML_TYPE_TBQP3_0;
+                            type_K != GGML_TYPE_TURBO2_0 && type_K != GGML_TYPE_TBQ3_0 &&
+                            type_K != GGML_TYPE_TBQ4_0 && type_K != GGML_TYPE_TBQP3_0;
 #ifdef V_DOT2_F32_F16_AVAILABLE
     constexpr dequantize_V_t dequantize_V = get_dequantize_V<type_V, half,  V_rows_per_thread>();
 #else
@@ -205,6 +206,23 @@ static __global__ void flash_attn_ext_vec(
 
         __syncthreads();
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    } else if constexpr (type_K == GGML_TYPE_TURBO2_0) {
+        static_assert(D == 2*QK_TURBO2, "TURBO2 requires head size 256");
+        for (int j = 0; j < ncols; ++j) {
+            float * buf = KQ;
+            const float * q = (const float *) (Q + j*nb01);
+            for (int i = tid; i < D; i += nthreads) {
+                buf[i] = (ncols == 1 || ic0 + j < int(ne01.z)) ? q[i]*ggml_turbo2_sign(i%QK_TURBO2, false) : 0.0f;
+            }
+            ggml_cuda_turbo2_wht(buf);
+            for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ) {
+                const int i = 2*(i0 + threadIdx.x%nthreads_KQ);
+                Q_reg[j][i0/nthreads_KQ] = make_float2(
+                    buf[i]*(0.08838834764831845f*ggml_turbo2_sign(i%QK_TURBO2, true))*scale,
+                    buf[i + 1]*(0.08838834764831845f*ggml_turbo2_sign((i + 1)%QK_TURBO2, true))*scale);
+            }
+            __syncthreads();
+        }
     } else if constexpr (type_K == GGML_TYPE_TBQ3_0 || type_K == GGML_TYPE_TBQ4_0 || type_K == GGML_TYPE_TBQP3_0) {
         static_assert(D == QK_TBQ, "TurboQuant requires head size 256");
         for (int j = 0; j < ncols; ++j) {
@@ -533,14 +551,24 @@ static __global__ void flash_attn_ext_vec(
                 if (gridDim.y == 1) {
                     dst_val /= KQ_sum[j_VKQ];
                 }
-                if constexpr (type_V == GGML_TYPE_TBQ3_0 || type_V == GGML_TYPE_TBQ4_0) {
+                if constexpr (type_V == GGML_TYPE_TURBO2_0 || type_V == GGML_TYPE_TBQ3_0 || type_V == GGML_TYPE_TBQ4_0) {
                     tbq_values[i0/nthreads] = dst_val;
                 } else {
                     dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
                 }
             }
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
-            if constexpr (type_V == GGML_TYPE_TBQ3_0 || type_V == GGML_TYPE_TBQ4_0) {
+            if constexpr (type_V == GGML_TYPE_TURBO2_0) {
+                __syncthreads();
+                for (int i = tid; i < D; i += nthreads) {
+                    KQ[i] = tbq_values[i/nthreads]*ggml_turbo2_sign(i%QK_TURBO2, true);
+                }
+                ggml_cuda_turbo2_wht(KQ);
+                for (int i = tid; i < D; i += nthreads) {
+                    dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i] =
+                        KQ[i]*(0.08838834764831845f*ggml_turbo2_sign(i%QK_TURBO2, false));
+                }
+            } else if constexpr (type_V == GGML_TYPE_TBQ3_0 || type_V == GGML_TYPE_TBQ4_0) {
                 __syncthreads();
                 for (int i = tid; i < D; i += nthreads) {
                     KQ[i] = tbq_values[i/nthreads];
@@ -665,3 +693,9 @@ extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TBQ4_0, GGML_TYPE_TBQ3_0);
 extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TBQ4_0, GGML_TYPE_TBQ4_0);
 extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TBQP3_0, GGML_TYPE_TBQ3_0);
 extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TBQP3_0, GGML_TYPE_TBQ4_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_0, GGML_TYPE_TURBO2_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_0, GGML_TYPE_TBQ3_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TURBO2_0, GGML_TYPE_TBQ4_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TBQ3_0, GGML_TYPE_TURBO2_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TBQ4_0, GGML_TYPE_TURBO2_0);
+extern DECL_FATTN_VEC_CASE(256, GGML_TYPE_TBQP3_0, GGML_TYPE_TURBO2_0);

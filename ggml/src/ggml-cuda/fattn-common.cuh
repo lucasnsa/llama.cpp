@@ -619,6 +619,38 @@ static __device__ __forceinline__ void dequantize_V_q8_0(const void * __restrict
 }
 
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+template <int D, int nthreads>
+static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_turbo2(
+        const char * K_c, const void * Q_v, const int * Q_q8, const void * Q_ds_v) {
+    static_assert(D == 2*QK_TURBO2, "TURBO2 requires head size 256");
+    const auto * k = (const block_turbo2_0 *) K_c;
+    float sum = 0.0f;
+    for (int i0 = 0; i0 < D/2; i0 += nthreads) {
+        const int i = 2*(i0 + threadIdx.x%nthreads);
+        const auto & block = k[i/QK_TURBO2];
+        const int offset = i%QK_TURBO2;
+        const float2 q = ((const float2 *) Q_v)[i0/nthreads];
+        const int a = (block.qs[offset/4] >> (2*(offset%4))) & 3;
+        const int b = (block.qs[(offset + 1)/4] >> (2*((offset + 1)%4))) & 3;
+        sum += __half2float(block.d)*(q.x*ggml_turbo2_centroid(a) + q.y*ggml_turbo2_centroid(b));
+    }
+    GGML_UNUSED(Q_q8);
+    GGML_UNUSED(Q_ds_v);
+    return sum;
+}
+
+template <typename T, int ne>
+static __device__ __forceinline__ void dequantize_V_turbo2(const void * vx, void * dst, const int64_t i0) {
+    static_assert(std::is_same_v<T, float>, "TurboQuant accumulates in float");
+    const auto * v = (const block_turbo2_0 *) vx;
+    for (int l = 0; l < ne; ++l) {
+        const auto & block = v[(i0 + l)/QK_TURBO2];
+        const int offset = (i0 + l)%QK_TURBO2;
+        const int index = (block.qs[offset/4] >> (2*(offset%4))) & 3;
+        ((float *) dst)[l] = __half2float(block.d)*ggml_turbo2_centroid(index);
+    }
+}
+
 template <ggml_type type_K, int D, int nthreads>
 static __device__ __forceinline__ float vec_dot_fattn_vec_KQ_tbq(
         const char * K_c, const void * Q_v, const int * Q_q8, const void * Q_ds_v) {
@@ -696,6 +728,8 @@ constexpr __device__ vec_dot_KQ_t get_vec_dot_KQ() {
     } else if constexpr (type_K == GGML_TYPE_BF16) {
         return vec_dot_fattn_vec_KQ_bf16<D, nthreads>;
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    } else if constexpr (type_K == GGML_TYPE_TURBO2_0) {
+        return vec_dot_fattn_vec_KQ_turbo2<D, nthreads>;
     } else if constexpr (type_K == GGML_TYPE_TBQ3_0 || type_K == GGML_TYPE_TBQ4_0 || type_K == GGML_TYPE_TBQP3_0) {
         return vec_dot_fattn_vec_KQ_tbq<type_K, D, nthreads>;
 #endif
@@ -722,6 +756,8 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
     } else if constexpr (type_V == GGML_TYPE_BF16) {
         return dequantize_V_bf16<float, ne>;
 #if !defined(GGML_USE_HIP) && !defined(GGML_USE_MUSA)
+    } else if constexpr (type_V == GGML_TYPE_TURBO2_0) {
+        return dequantize_V_turbo2<T, ne>;
     } else if constexpr (type_V == GGML_TYPE_TBQ3_0 || type_V == GGML_TYPE_TBQ4_0) {
         return dequantize_V_tbq<type_V, T, ne>;
 #endif

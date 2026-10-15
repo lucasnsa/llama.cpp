@@ -54,8 +54,10 @@ function(ggml_cuda_fattn_vec_instances DIR OUT_SRCS)
     set(FA_TYPES q4_0 q4_1 q5_0 q5_1 q8_0 bf16 f16)
     set(FA_TBQ_COMBINATIONS
         tbq3_0-tbq3_0 tbq3_0-tbq4_0 tbq4_0-tbq3_0 tbq4_0-tbq4_0
-        tbqp3_0-tbq3_0 tbqp3_0-tbq4_0)
-    set(FA_TBQ_TYPES tbq3_0 tbq4_0 tbqp3_0)
+        tbqp3_0-tbq3_0 tbqp3_0-tbq4_0
+        turbo2_0-turbo2_0 turbo2_0-tbq3_0 turbo2_0-tbq4_0
+        tbq3_0-turbo2_0 tbq4_0-turbo2_0 tbqp3_0-turbo2_0)
+    set(FA_TBQ_TYPES turbo2_0 tbq3_0 tbq4_0 tbqp3_0)
     set(FA_TBQ_ENABLED OFF)
     if (ARGV2 STREQUAL "TURBOQUANT")
         set(FA_TBQ_ENABLED ON)
