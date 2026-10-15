@@ -1,6 +1,7 @@
 #include "llama-kv-cache.h"
 
 #include "gguf.h"
+#include "../ggml/src/ggml-turboquant.h"
 #include "llama-impl.h"
 #include "llama-io.h"
 #include "llama-model.h"
@@ -99,6 +100,10 @@ llama_kv_cache::llama_kv_cache(
     }
 
     GGML_ASSERT(kv_size % n_pad == 0);
+    if (other && (ggml_type_is_turboquant(type_k) || ggml_type_is_turboquant(type_v)) &&
+        (other->type_k() != type_k || other->type_v() != type_v)) {
+        throw std::runtime_error("TurboQuant shared KV cache types must match");
+    }
 
     const uint32_t n_layer = hparams.n_layer_all;
 
@@ -221,6 +226,26 @@ llama_kv_cache::llama_kv_cache(
             dev_name = ggml_backend_dev_name(dev);
         }
 
+        if (ggml_type_is_turboquant(type_k) || ggml_type_is_turboquant(type_v)) {
+            auto * dev = ggml_backend_buft_get_device(buft);
+            if (!dev || strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev)), "CUDA") != 0) {
+                throw std::runtime_error("TurboQuant requires CUDA KV buffers for every attention layer; check -ngl and remove --no-kv-offload");
+            }
+            ggml_init_params probe_params = {6*ggml_tensor_overhead(), nullptr, true};
+            ggml_context_ptr probe(ggml_init(probe_params));
+            if (!probe) {
+                throw std::runtime_error("failed to create TurboQuant capability probe");
+            }
+            ggml_tensor * q_probe = ggml_new_tensor_3d(probe.get(), GGML_TYPE_F32, 256, 1, hparams.n_head(il));
+            ggml_tensor * k_probe = ggml_new_tensor_3d(probe.get(), type_k, 256, 256, hparams.n_head_kv(il));
+            ggml_tensor * v_probe = ggml_new_tensor_3d(probe.get(), type_v, 256, 256, hparams.n_head_kv(il));
+            ggml_tensor * mask_probe = ggml_new_tensor_2d(probe.get(), GGML_TYPE_F16, 256, 1);
+            ggml_tensor * attn_probe = ggml_flash_attn_ext(probe.get(), q_probe, k_probe, v_probe, mask_probe, 1.0f/16.0f, 0.0f, 0.0f);
+            if (!ggml_backend_dev_supports_op(dev, attn_probe)) {
+                throw std::runtime_error("TurboQuant CUDA Flash Attention pair is unavailable; enable GGML_CUDA_FA and select the pair in GGML_CUDA_FA_QUANTS");
+            }
+        }
+
         LLAMA_LOG_DEBUG("%s: layer %3d: dev = %s\n", __func__, il, dev_name);
 
         ggml_context * ctx = ctx_for_buft(buft);
@@ -323,10 +348,11 @@ llama_kv_cache::llama_kv_cache(
             !attn_rot_disable &&
             n_embd_head_k_all > 0 &&
             ggml_is_quantized(type_k) &&
+            !ggml_type_is_turboquant(type_k) &&
             hparams.n_embd_head_k() % 64 == 0;
 
         // always create Hadamard rotation tensors for DeepSeek lightning indexers
-        if ((model.arch == LLM_ARCH_DEEPSEEK32 || model.arch == LLM_ARCH_DEEPSEEK4 ||
+        if (!ggml_type_is_turboquant(type_k) && (model.arch == LLM_ARCH_DEEPSEEK32 || model.arch == LLM_ARCH_DEEPSEEK4 ||
                 model.arch == LLM_ARCH_GLM_DSA || model.arch == LLM_ARCH_DOTS3NOTE) &&
                 hparams.n_embd_head_k_full == hparams.indexer_head_size) {
             attn_rot_k = true;
@@ -336,6 +362,7 @@ llama_kv_cache::llama_kv_cache(
             !attn_rot_disable &&
             n_embd_head_v_all > 0 &&
             ggml_is_quantized(type_v) &&
+            !ggml_type_is_turboquant(type_v) &&
             hparams.n_embd_head_v() % 64 == 0;
     }
 
@@ -1202,6 +1229,9 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
 }
 
 bool llama_kv_cache::get_can_shift() const {
+    if (ggml_type_is_turboquant(type_k()) || ggml_type_is_turboquant(type_v())) {
+        return false;
+    }
     // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
     if (model.arch == LLM_ARCH_STEP35) {
         return false;

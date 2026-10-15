@@ -1,4 +1,5 @@
 #include "arg.h"
+#include "../ggml/src/ggml-turboquant.h"
 
 #include "build-info.h"
 #include "chat.h"
@@ -311,9 +312,24 @@ const std::vector<ggml_type> kv_cache_types = {
     GGML_TYPE_IQ4_NL,
     GGML_TYPE_Q5_0,
     GGML_TYPE_Q5_1,
+    GGML_TYPE_TBQ3_0,
+    GGML_TYPE_TBQ4_0,
+    GGML_TYPE_TBQP3_0,
 };
 
-static ggml_type kv_cache_type_from_str(const std::string & s) {
+static ggml_type kv_cache_type_from_str(const std::string & s, bool is_v = false) {
+    if (s == "tbqp3" || s == "tbqp3_0") {
+        if (is_v) {
+            throw std::invalid_argument("tbqp3 is supported for K cache only; use tbq3 or tbq4 for V");
+        }
+        return GGML_TYPE_TBQP3_0;
+    }
+    if (s == "tbq3") {
+        return GGML_TYPE_TBQ3_0;
+    }
+    if (s == "tbq4") {
+        return GGML_TYPE_TBQ4_0;
+    }
     for (const auto & type : kv_cache_types) {
         if (ggml_type_name(type) == s) {
             return type;
@@ -322,10 +338,19 @@ static ggml_type kv_cache_type_from_str(const std::string & s) {
     throw std::runtime_error("Unsupported cache type: " + s);
 }
 
-static std::string get_all_kv_cache_types() {
+static std::string get_all_kv_cache_types(bool is_v = false) {
     std::ostringstream msg;
     for (const auto & type : kv_cache_types) {
-        msg << ggml_type_name(type) << (&type == &kv_cache_types.back() ? "" : ", ");
+        if (is_v && type == GGML_TYPE_TBQP3_0) {
+            continue;
+        }
+        if (msg.tellp() > 0) {
+            msg << ", ";
+        }
+        msg << ggml_type_name(type);
+        if (ggml_type_is_turboquant(type)) {
+            msg << " (" << (type == GGML_TYPE_TBQ3_0 ? "tbq3" : type == GGML_TYPE_TBQ4_0 ? "tbq4" : "tbqp3") << ")";
+        }
     }
     return msg.str();
 }
@@ -959,6 +984,15 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
             params.use_jinja ? "" : "\nnote: llama.cpp was started without --jinja, we only support commonly used templates"
         ));
     }
+
+    auto validate_cache_pair = [](ggml_type k, ggml_type v) {
+        if ((ggml_type_is_turboquant(k) || ggml_type_is_turboquant(v)) &&
+            (!ggml_type_is_turboquant(k) || !ggml_type_is_turboquant(v) || v == GGML_TYPE_TBQP3_0)) {
+            throw std::invalid_argument("TurboQuant requires K=tbq3/tbq4/tbqp3 and V=tbq3/tbq4");
+        }
+    };
+    validate_cache_pair(params.cache_type_k, params.cache_type_v);
+    validate_cache_pair(params.speculative.draft.cache_type_k, params.speculative.draft.cache_type_v);
 
     return true;
 }
@@ -2441,11 +2475,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             "KV cache data type for V\n"
             "allowed values: %s\n"
             "(default: %s)",
-            get_all_kv_cache_types().c_str(),
+            get_all_kv_cache_types(true).c_str(),
             ggml_type_name(params.cache_type_v)
         ),
         [](common_params & params, const std::string & value) {
-            params.cache_type_v = kv_cache_type_from_str(value);
+            params.cache_type_v = kv_cache_type_from_str(value, true);
         }
     ).set_env("LLAMA_ARG_CACHE_TYPE_V"));
     add_opt(common_arg(
@@ -4066,11 +4100,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             "KV cache data type for V for the draft model\n"
             "allowed values: %s\n"
             "(default: %s)",
-            get_all_kv_cache_types().c_str(),
+            get_all_kv_cache_types(true).c_str(),
             ggml_type_name(params.speculative.draft.cache_type_v)
         ),
         [](common_params & params, const std::string & value) {
-            params.speculative.draft.cache_type_v = kv_cache_type_from_str(value);
+            params.speculative.draft.cache_type_v = kv_cache_type_from_str(value, true);
         }
     ).set_env("LLAMA_ARG_SPEC_DRAFT_CACHE_TYPE_V"));
     add_opt(common_arg(

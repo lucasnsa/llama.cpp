@@ -1,3 +1,4 @@
+#include "../ggml/src/ggml-turboquant.h"
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-model-loader.h"
@@ -682,6 +683,15 @@ static ggml_type llama_tensor_get_type(quantize_state_impl & qs, const llama_mod
     if (!tensor_allows_quantization(params, qs.model.arch, tensor)) {
         return tensor->type;
     }
+    if (ggml_type_is_turboquant(params->token_embedding_type) || ggml_type_is_turboquant(params->output_tensor_type)) {
+        throw std::runtime_error("TurboQuant types are supported for KV cache only");
+    }
+    for (const auto & pattern : qs.tensor_type_patterns) {
+        if (ggml_type_is_turboquant(pattern.second)) {
+            throw std::runtime_error("TurboQuant types are supported for KV cache only");
+        }
+    }
+
     if (params->token_embedding_type < GGML_TYPE_COUNT && tm.category == tensor_category::TOKEN_EMBD) {
         return params->token_embedding_type;
     }

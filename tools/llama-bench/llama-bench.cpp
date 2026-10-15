@@ -476,6 +476,15 @@ static void print_usage(int /* argc */, char ** argv) {
 }
 
 static ggml_type ggml_type_from_name(const std::string & s) {
+    if (s == "tbq3" || s == "tbq3_0") {
+        return GGML_TYPE_TBQ3_0;
+    }
+    if (s == "tbq4" || s == "tbq4_0") {
+        return GGML_TYPE_TBQ4_0;
+    }
+    if (s == "tbqp3" || s == "tbqp3_0") {
+        return GGML_TYPE_TBQP3_0;
+    }
     if (s == "f16") {
         return GGML_TYPE_F16;
     }

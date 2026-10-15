@@ -1,3 +1,4 @@
+#include "../ggml/src/ggml-turboquant.h"
 #include "llama-model-loader.h"
 
 #include "ggml-alloc.h"
@@ -731,6 +732,9 @@ llama_model_loader::llama_model_loader(
             const ggml_tensor * tensor = w.tensor;
 
             enum ggml_type type = tensor->type;
+            if (ggml_type_is_turboquant(type)) {
+                throw std::runtime_error(format("tensor '%s' uses KV-only type %s", tensor->name, ggml_type_name(type)));
+            }
 
             n_type[type]++;
 

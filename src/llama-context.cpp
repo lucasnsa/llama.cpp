@@ -1,6 +1,7 @@
 #include "llama-context.h"
 
 #include "ggml.h"
+#include "../ggml/src/ggml-turboquant.h"
 #include "llama-arch.h"
 #include "llama-batch.h"
 #include "llama-ext.h"
@@ -4121,6 +4122,30 @@ llama_context * llama_init_from_model(
         if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
             LLAMA_LOG_ERROR("%s: SPLIT_MODE_TENSOR requires flash_attn to be enabled\n", __func__);
             return nullptr;
+        }
+    }
+
+    if (ggml_type_is_turboquant(params.type_k) || ggml_type_is_turboquant(params.type_v)) {
+        if (!ggml_type_is_turboquant(params.type_k) || !ggml_type_is_turboquant(params.type_v) || params.type_v == GGML_TYPE_TBQP3_0) {
+            LLAMA_LOG_ERROR("%s: TurboQuant requires K=tbq3/tbq4/tbqp3 and V=tbq3/tbq4\n", __func__);
+            return nullptr;
+        }
+        if (!params.offload_kqv) {
+            LLAMA_LOG_ERROR("%s: TurboQuant requires CUDA KV offload\n", __func__);
+            return nullptr;
+        }
+        if (model->hparams.is_mla()) {
+            LLAMA_LOG_ERROR("%s: TurboQuant does not support MLA cache layouts\n", __func__);
+            return nullptr;
+        }
+        for (uint32_t il = 0; il < model->hparams.n_layer_all; ++il) {
+            if (!model->hparams.has_kv(il) || model->hparams.is_recr(il)) {
+                continue;
+            }
+            if (model->hparams.n_embd_head_k(il) != 256 || model->hparams.n_embd_head_v(il) != 256) {
+                LLAMA_LOG_ERROR("%s: TurboQuant requires K and V head size 256 (layer %u)\n", __func__, il);
+                return nullptr;
+            }
         }
     }
 
